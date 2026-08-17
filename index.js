@@ -57,12 +57,11 @@ const MIME = {
 const DEFAULT_CONFIG = {
   maxRooms: 3,              // 同时进行的最多对局数
   idleTimeoutMs: 1800000,   // 无玩家连接多久后回收房间（30 分钟）
-  defaultPlayers: 4,        // 命令缺省玩家数
-  defaultAi: 3,             // 命令缺省 AI 数
+  defaultPlayers: 4,        // 命令缺省玩家数（全真人，人齐开局）
   openingHandCount: 4,
-  aiDriver: 'simple',       // qwen | ollama | simple（无 API Key 也能玩）
+  aiDriver: 'simple',       // qwen | ollama | simple（仅用于断线托管；开局前不占 AI 座位）
   allowMultiSource: false,  // 同一台机器是否允许多个座位（原版同机单账号校验）
-  chatEvents: true,         // 建房/回收是否向聊天室发公告
+  chatEvents: true,         // 建房/回收/结束/续局是否向聊天室发公告
 };
 
 function staticFile(req, res, url, name) {
@@ -75,15 +74,15 @@ function staticFile(req, res, url, name) {
 
 export default {
   name: 'sanguosha',
-  version: '1.0.0',
-  description: '三国杀联机：聊天室命令建房 + 公告拉人 + 独立对局页（host-authoritative，支持 AI 座位与断线托管）',
+  version: '1.1.0',
+  description: '三国杀联机：聊天室命令建房（全真人，人齐开局）+ 公告拉人 + 独立对局页；对局结束真人确认后续局（断线托管由 LLM/本地策略代打）',
   enabledByDefault: false,
   defaultConfig: DEFAULT_CONFIG,
   setup(ctx) {
     const { registry, db, eventBus, server, json, requireUser, hydrateMessages, broadcast, publicBaseUrl, pluginConfig } = ctx;
     const cfg = { ...DEFAULT_CONFIG, ...pluginConfig };
 
-    /** roomKey -> { server, port, chatRoomId, creatorId, playerCount, aiCount, lastActiveAt, wsClients } */
+    /** roomKey -> { server, port, chatRoomId, creatorId, playerCount, lastActiveAt, wsClients, gameOverNotified } */
     const rooms = new Map();
     const roomWsServers = new Map(); // roomKey -> WebSocketServer (noServer)
 
@@ -104,24 +103,33 @@ export default {
       broadcast({ type: 'message', room_id: chatRoomId, message_id: Number(result.lastInsertRowid), thread_root: null, message: hydrated }, chatRoomId);
     }
 
-    // ── 建房 ──
-    async function createRoom(roomKey, chatRoomId, creatorId, playerCount, aiCount) {
+    // ── 建房：全真人房间（aiCount=0，人齐才开局；AI 仅断线托管用） ──
+    async function createRoom(roomKey, chatRoomId, creatorId, playerCount) {
       const gameServer = new GameServer({
         host: '127.0.0.1',
         port: 0,
         playerCount,
         openingHandCount: cfg.openingHandCount,
-        autoRestartAfterGameOver: true,
+        autoRestartAfterGameOver: false, // 下一局由真人确认后 requestRestart()
         allowMultiConnectionsPerSource: cfg.allowMultiSource,
-        aiCount,
+        aiCount: 0, // 空位不由 AI 代占：直到人齐才开局
         aiDriver: cfg.aiDriver,
         rulesPath: join(PLUGIN_ROOT, 'rules.md'),
       });
       const port = await gameServer.listen();
-      const room = { server: gameServer, port, chatRoomId, creatorId, playerCount, aiCount, lastActiveAt: Date.now(), wsClients: new Set() };
+      const room = {
+        server: gameServer,
+        port,
+        chatRoomId,
+        creatorId,
+        playerCount,
+        lastActiveAt: Date.now(),
+        wsClients: new Set(),
+        gameOverNotified: false, // 对局结束是否已向聊天室发过「确认续局」公告
+      };
       rooms.set(roomKey, room);
       const link = `${publicBaseUrl}/api/sanguosha/?room=${encodeURIComponent(roomKey)}`;
-      postChatMessage(chatRoomId, creatorId, `创建了三国杀${playerCount}人局（AI×${aiCount}，开局后自动续局）。[点击加入对局](${link})；其他玩家也可直接打开：${link}`);
+      postChatMessage(chatRoomId, creatorId, `创建了三国杀${playerCount}人局（全真人，人齐开局）。[点击加入对局](${link})；其他玩家也可直接打开：${link}`);
       return room;
     }
 
@@ -137,13 +145,28 @@ export default {
       }
     }
 
-    // ── 聊天室命令：/sanguosha [玩家数 [AI数]] ──
+    // ── 聊天室命令：/sanguosha [玩家数]（全真人）；对局结束时可确认续局 ──
     const onMessageSent = ({ roomId, message, sender }) => {
       const text = String(message?.content || '').trim();
-      const cmd = text.match(/^\/(?:sanguosha|sgs)(?:\s+(\d+))?(?:\s+(\d+))?/);
+      const cmd = text.match(/^\/(?:sanguosha|sgs)(?:\s+(\d+))?/);
       if (!cmd) return;
       const roomKey = `chat-${roomId}`;
-      if (rooms.has(roomKey)) {
+      const existing = rooms.get(roomKey);
+      if (existing) {
+        if (existing.server.isGameOver()) {
+          // 对局已结束：真人确认后开下一局（已连接的玩家保持连接，原地无缝续玩）
+          void existing.server.requestRestart().then((ok) => {
+            if (ok) {
+              existing.gameOverNotified = false;
+              postChatMessage(roomId, sender.id, '已确认！新一局三国杀开始（对局页玩家将自动进入新局）。');
+            } else {
+              postChatMessage(roomId, sender.id, '对局尚未结束或正在切换中，请稍后再试。');
+            }
+          }).catch((error) => {
+            postChatMessage(roomId, sender.id, `开启下一局失败：${error instanceof Error ? error.message : String(error)}`);
+          });
+          return;
+        }
         postChatMessage(roomId, sender.id, `本聊天室已有一局三国杀进行中：${publicBaseUrl}/api/sanguosha/?room=${encodeURIComponent(roomKey)}`);
         return;
       }
@@ -152,16 +175,11 @@ export default {
         return;
       }
       const playerCount = cmd[1] ? Number(cmd[1]) : cfg.defaultPlayers;
-      const aiCount = cmd[2] !== undefined ? Number(cmd[2]) : Math.min(cfg.defaultAi, Math.max(0, playerCount - 1));
       if (!Number.isInteger(playerCount) || playerCount < 2 || playerCount > 6) {
-        postChatMessage(roomId, sender.id, '玩家数需为 2–6，用法：/sanguosha [玩家数 [AI数]]');
+        postChatMessage(roomId, sender.id, '玩家数需为 2–6，用法：/sanguosha [玩家数]（全真人，人齐开局）');
         return;
       }
-      if (!Number.isInteger(aiCount) || aiCount < 0 || aiCount >= playerCount) {
-        postChatMessage(roomId, sender.id, `AI 数需为 0–${playerCount - 1}`);
-        return;
-      }
-      void createRoom(roomKey, roomId, sender.id, playerCount, aiCount).catch((error) => {
+      void createRoom(roomKey, roomId, sender.id, playerCount).catch((error) => {
         postChatMessage(roomId, sender.id, `创建对局失败：${error instanceof Error ? error.message : String(error)}`);
       });
     };
@@ -254,13 +272,23 @@ export default {
       ws.on('error', () => tcp.destroy());
     }
 
-    // 心跳：回收 WS 心跳 + 空闲房间回收
+    // 心跳：WS 心跳 + 空闲房间回收 + 对局结束检测（轮询 GameServer 状态，全玩家掉线也能发现）
     registry.registerHeartbeat(() => {
       for (const [key, room] of rooms) {
         for (const ws of room.wsClients) {
           if (ws.isAlive === false) { ws.terminate(); room.wsClients.delete(ws); continue; }
           ws.isAlive = false;
           ws.ping();
+        }
+        // 对局结束 → 公告「确认续局」（只公告一次；续局/新开局后复位）
+        const result = room.server.getGameResult();
+        if (result && !room.gameOverNotified) {
+          room.gameOverNotified = true;
+          if (cfg.chatEvents) {
+            postChatMessage(room.chatRoomId, room.creatorId, `${result.message} 发送 /sanguosha 确认开下一局（对局页玩家保持连接，确认后自动进入新局）。`);
+          }
+        } else if (!result && room.gameOverNotified) {
+          room.gameOverNotified = false;
         }
         const now = Date.now();
         if (room.wsClients.size === 0 && now - room.lastActiveAt > cfg.idleTimeoutMs) {

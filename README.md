@@ -8,15 +8,15 @@ PolyChat 插件：把 [CLI-SanGuoSha](https://github.com/123456Zhe/Cli-SanGuoSha
 
    | 命令 | 效果 |
    |---|---|
-   | `/sanguosha` | 4 人局，发起者 + 3 个 AI 座位（即开即玩） |
-   | `/sanguosha 5 0` | 5 人纯玩家局（等 4 个真人） |
-   | `/sanguosha 3 1` | 3 人局 1 个 AI |
-   | `/sgs 4 2` | `/sanguosha` 的别名 |
+   | `/sanguosha` | 4 人局（全真人，等齐 4 人开局） |
+   | `/sanguosha 5` | 5 人局 |
+   | `/sgs 3` | `/sanguosha` 的别名，3 人局 |
 
 2. 插件在聊天室发一条公告（markdown 链接）。**发起者和其他玩家都从链接进入对局页**：
    - 对局页自动以你的 PolyChat 账号名入座，无需填名；
-   - 同一聊天室同时只有一局；玩家数 2–6，AI 数 0–(玩家数-1)；
-   - 对局结束自动开下一局（同房间常驻）；断线自动 AI 托管，60 秒内可重连取回。
+   - 同一聊天室同时只有一局；玩家数 2–6，**全部为真人座位，人齐才开局**（空位不会被 AI 代占）；
+   - 对局结束**需在聊天室发送 `/sanguosha` 确认后开下一局**（对局页玩家保持连接，确认后自动进入新局）；
+   - 断线自动 AI 托管（`aiDriver` 驱动），60 秒内可重连取回。
 
 ## 安装
 
@@ -35,7 +35,6 @@ PolyChat 插件：把 [CLI-SanGuoSha](https://github.com/123456Zhe/Cli-SanGuoSha
         "maxRooms": 3,
         "idleTimeoutMs": 1800000,
         "defaultPlayers": 4,
-        "defaultAi": 3,
         "openingHandCount": 4,
         "aiDriver": "simple",
         "allowMultiSource": false,
@@ -52,11 +51,15 @@ PolyChat 插件：把 [CLI-SanGuoSha](https://github.com/123456Zhe/Cli-SanGuoSha
 |---|---|---|
 | `maxRooms` | 3 | 同时进行的最多对局数 |
 | `idleTimeoutMs` | 1800000 | 无玩家连接后多久回收房间（毫秒） |
-| `defaultPlayers` / `defaultAi` | 4 / 3 | `/sanguosha` 缺省玩家数 / AI 数 |
+| `defaultPlayers` | 4 | `/sanguosha` 缺省玩家数（全真人） |
 | `openingHandCount` | 4 | 起手牌数 |
-| `aiDriver` | `simple` | AI 驱动：`qwen` / `ollama` / `simple`（无 API Key 也能玩） |
+| `aiDriver` | `simple` | 断线托管 AI 驱动：`qwen` / `ollama` / `simple`（qwen 需容器内配置 `STEP_PLAN_API_KEY`，见下） |
 | `allowMultiSource` | false | 同机多座位放行（原版同机单账号校验默认开启） |
-| `chatEvents` | true | 建房/回收时向聊天室发公告 |
+| `chatEvents` | true | 建房/回收/结束/续局时向聊天室发公告 |
+
+> qwen 驱动的 LLM 配置（与 CLI-SanGuoSha 本地一致）：`STEP_PLAN_API_KEY`（必填）、可选
+> `STEP_PLAN_BASE_URL`（默认 `https://api.stepfun.com/step_plan/v1`）、`STEP_PLAN_MODEL`
+> （默认 `step-3.7-flash`）。docker-compose 需把这些变量透传进 polychat 容器。
 
 ## 架构
 

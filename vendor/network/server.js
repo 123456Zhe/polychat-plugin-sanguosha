@@ -13,6 +13,8 @@ const AI_NAME_PREFIX = "[AI]电脑-";
 const AI_NAME_SEQUENCE = ["甲", "乙", "丙", "丁", "戊"];
 const DEFAULT_CONTEXT_ROUNDS = 30;
 const AI_ACTION_PACING_MS = 800;
+/** 服务端日志上限：无限长的 AI 托管对局（如无人干预的 AI 互打）不得让日志数组无限增长。 */
+const LOGS_MAX_LINES = 2000;
 const secureRng = () => randomInt(0, 0x1_0000_0000) / 0x1_0000_0000;
 /** 来源指纹：sha1(IP:机器标识)。机器标识由客户端持久化（WebUI=localStorage，CLI=配置文件），
  *  使同一公网 IP（NAT）下的不同机器不会被误判为同一台；同一台机器的不同窗口/终端可被识别。 */
@@ -77,9 +79,12 @@ export class GameServer {
             return "";
         }
     }
-    /** 追加对局日志；debug 等级下逐条回显到房主控制台并完整追加写入 devlog/server-log.md（跨局保留，不截断）。 */
+    /** 追加对局日志（超出 LOGS_MAX_LINES 时裁剪最旧行，防止无限对局内存增长）；debug 等级下回显并写入 devlog/server-log.md。 */
     log(...lines) {
         this.logs.push(...lines);
+        if (this.logs.length > LOGS_MAX_LINES) {
+            this.logs = this.logs.slice(-LOGS_MAX_LINES);
+        }
         if (this.options.logLevel !== "debug") {
             return;
         }
@@ -196,17 +201,51 @@ export class GameServer {
     async checkAndHandleGameOver() {
         if (!this.game.isGameOver() || this.restarting)
             return;
-        if (!this.options.autoRestartAfterGameOver)
-            return;
         this.restarting = true;
         const snapshot = this.game.getSnapshot();
         const winner = snapshot.winner;
         const msg = '游戏结束：' + (winner === 'draw' ? '平局！' : (winner === 'human' ? '人类玩家胜利！' : 'AI 玩家胜利！'));
         this.broadcast({ type: "game_over", winner, message: msg });
         this.log(msg);
+        if (!this.options.autoRestartAfterGameOver) {
+            // 嵌入宿主（如聊天插件）场景：只广播结束，不开下一局——由宿主在真人确认后调用 requestRestart()。
+            this.restarting = false;
+            return;
+        }
         await new Promise((resolve) => setTimeout(resolve, 3000));
         await this.restartGame();
         this.restarting = false;
+    }
+    /** 对局是否已结束（宿主轮询检测用，配合 autoRestartAfterGameOver=false）。 */
+    isGameOver() {
+        return this.game.isGameOver();
+    }
+    /** 对局结果摘要；未结束时返回 null（宿主用于生成「等待确认续局」公告）。 */
+    getGameResult() {
+        if (!this.game.isGameOver()) {
+            return null;
+        }
+        const winner = this.game.getSnapshot().winner;
+        const message = '游戏结束：' + (winner === 'draw' ? '平局！' : (winner === 'human' ? '人类玩家胜利！' : 'AI 玩家胜利！'));
+        return { winner, message };
+    }
+    /**
+     * 宿主在真人玩家确认后手动开启下一局（配合 autoRestartAfterGameOver=false）。
+     * 仅在当前对局已结束时生效；已连接玩家收到 game_restarting 广播后无缝进入新一局，
+     * 人数不足时回到等待加入状态（started=false）。
+     */
+    async requestRestart() {
+        if (this.restarting || !this.game.isGameOver()) {
+            return false;
+        }
+        this.restarting = true;
+        try {
+            await this.restartGame();
+            return true;
+        }
+        finally {
+            this.restarting = false;
+        }
     }
     accept(socket) {
         const parser = new JsonLineParser();
@@ -555,6 +594,13 @@ export class GameServer {
                 if (!current || !current.alive || !this.isAiDriven(current.id) || current.id !== aiId) {
                     return;
                 }
+                // 弃牌阶段：引擎只对 isAI 原生座位自动弃牌；断线托管的人类座位（isAI=false）
+                // 必须由服务端主动弃牌，否则回合会永久卡死在弃牌阶段（getPlayableActions 为空、无人发 discard）。
+                if (this.game.getPendingDiscardCount(aiId) > 0) {
+                    await this.discardPendingForAi(aiId, driveEpoch);
+                    await this.resolveTurnEnd(aiId);
+                    continue;
+                }
                 if (this.game.getPlayableActions(aiId).length === 0) {
                     return;
                 }
@@ -618,6 +664,20 @@ export class GameServer {
         }
         finally {
             this.activeDrivers.delete(aiId);
+        }
+    }
+    /** AI 托管座位的弃牌阶段：逐张弃掉超出体力的手牌（引擎只自动处理 isAI 原生座位）。 */
+    async discardPendingForAi(aiId, driveEpoch) {
+        while (!this.isStaleDrive(aiId, driveEpoch) && this.game.getPendingDiscardCount(aiId) > 0) {
+            const options = this.game.getDiscardOptions(aiId);
+            const first = options[0];
+            if (!first) {
+                break;
+            }
+            const logs = await this.game.discardForCurrentPlayer(aiId, first.handIndex);
+            this.log(...logs);
+            this.broadcastState();
+            await this.delay(150);
         }
     }
     /** 强制结束当前 AI 的出牌阶段；返回 false 表示回合已终止（无人存活或无结束动作）。 */
