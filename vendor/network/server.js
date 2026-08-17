@@ -300,6 +300,14 @@ export class GameServer {
         else if (message.type === "interaction") {
             this.handleInteraction(peer, message.decision);
         }
+        else if (message.type === "confirm_next") {
+            // 结算画面：真人玩家点「确认下一局」→ 手动重启（需对局已结束）
+            void this.requestRestart().then((ok) => {
+                if (ok) {
+                    this.log(`${peer.name} 确认下一局`);
+                }
+            });
+        }
     }
     /** 来源信息：有机器标识的连接视为“已验证机器”（参加同机校验）；否则降级为仅按 IP 指纹，不参与机器校验。 */
     getSourceInfo(socket) {
