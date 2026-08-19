@@ -46,4 +46,9 @@ CHANGES=$(git diff --stat | head -1)
 git add -A
 git commit -m "auto-sync: $(date '+%Y-%m-%d %H:%M') — $CHANGES" 2>&1 | tail -2
 
+# 6. Push to remotes
+log "推送到远程仓库..."
+git push origin main 2>&1 | tail -2 || log "⚠️ origin push 失败"
+git push github main 2>&1 | tail -2 || log "⚠️ github push 失败"
+
 log "=== 同步完成: $CHANGES ==="
