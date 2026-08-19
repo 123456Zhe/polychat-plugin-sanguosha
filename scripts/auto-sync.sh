@@ -24,11 +24,20 @@ git clone --depth 1 "$UPSTREAM_URL" "$TMP_DIR" 2>&1 | tail -3
 
 # 2. Install deps & build
 log "安装依赖..."
-cd "$TMP_DIR" && npm install --silent 2>&1 | tail -2
+cd "$TMP_DIR" && npm install --prefer-offline --no-optional 2>&1 | tail -3 || {
+    log "❌ npm install 失败，跳过本次同步"
+    exit 1
+}
 
 log "构建 webui..."
-cd "$TMP_DIR/webui" && npm install --silent 2>&1 | tail -1
-npm run build 2>&1 | tail -3
+cd "$TMP_DIR/webui" && npm install --prefer-offline --no-optional 2>&1 | tail -2 || {
+    log "❌ webui npm install 失败，跳过本次同步"
+    exit 1
+}
+npm run build 2>&1 | tail -3 || {
+    log "❌ webui build 失败，跳过本次同步"
+    exit 1
+}
 
 # 3. Sync vendor
 log "同步 vendor..."
