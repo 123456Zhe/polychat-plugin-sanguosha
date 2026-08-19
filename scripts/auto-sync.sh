@@ -64,7 +64,9 @@ log "✅ 已提交: $CHANGES"
 
 # 7. Push to remotes
 log "推送到远程仓库..."
-git push origin main >> "$LOG_FILE" 2>&1 && log "✅ origin push 成功" || log "⚠️  origin push 失败"
-git push github main >> "$LOG_FILE" 2>&1 && log "✅ github push 成功" || log "⚠️  github push 失败"
+git push origin main >> "$LOG_FILE" 2>&1 \
+    && log "✅ Gitea push 成功" || log "⚠️  Gitea push 失败"
+git push github main >> "$LOG_FILE" 2>&1 \
+    && log "✅ GitHub push 成功" || log "⚠️  GitHub push 失败"
 
 log "=== 同步完成 ==="
