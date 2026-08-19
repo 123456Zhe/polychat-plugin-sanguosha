@@ -208,6 +208,13 @@ export default {
       if (tail === 'app.js' || tail === 'style.css') {
         return staticFile(req, res, url, tail);
       }
+      // 新版 webui 资产：assets/index-*.js / assets/index-*.css
+      if (tail.startsWith('assets/')) {
+        const assetName = tail.slice('assets/'.length);
+        if (/^index-[\w-]+\.(js|css)$/.test(assetName)) {
+          return staticFile(req, res, url, `assets/${assetName}`);
+        }
+      }
       return json(res, 404, { error: '页面不存在' });
     });
 

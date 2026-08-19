@@ -26,6 +26,9 @@ for f in server protocol line-parser; do
 done
 cp "$DIST/devlog/ailog.js" "$ROOT/vendor/devlog/"
 cp "$GAME_REPO/rules.md" "$ROOT/rules.md"
-cp "$GAME_REPO/webui/index.html" "$GAME_REPO/webui/app.js" "$GAME_REPO/webui/style.css" "$ROOT/webui/"
+# 新版 webui 是 Vue 3 + Vite 产物，输出在 webui/dist/（index.html + assets/）
+rm -rf "$ROOT/webui" && mkdir -p "$ROOT/webui/assets"
+cp "$GAME_REPO/webui/dist/index.html" "$ROOT/webui/"
+cp "$GAME_REPO/webui/dist/assets/"* "$ROOT/webui/assets/"
 
 echo "vendor 快照已更新（engine/agent/network/devlog + rules.md + webui）"
