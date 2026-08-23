@@ -1,7 +1,7 @@
 // PolyChat 插件：三国杀联机。
 //
-// 玩法：在任意聊天室发送 `/sanguosha [玩家数 [AI数]]`（如 `/sanguosha` = 4人局3AI，
-// `/sanguosha 5 0` = 纯玩家5人局），插件为该聊天室创建一个 host-authoritative 对局并
+// 玩法：在任意聊天室发送 `/sanguosha [玩家数 [AI数]]`（如 `/sanguosha` = 4人局全真人，
+// `/sanguosha 4 3` = 4人局3个AI，1 名真人即可立即开局），插件为该聊天室创建一个 host-authoritative 对局并
 // 发公告（含加入链接）。点链接进入独立对局页，自动以 polychat 账号名入座。
 //
 // 架构：
@@ -82,7 +82,7 @@ export default {
     const { registry, db, eventBus, server, json, requireUser, hydrateMessages, broadcast, publicBaseUrl, pluginConfig } = ctx;
     const cfg = { ...DEFAULT_CONFIG, ...pluginConfig };
 
-    /** roomKey -> { server, port, chatRoomId, creatorId, playerCount, lastActiveAt, wsClients, gameOverNotified } */
+    /** roomKey -> { server, port, chatRoomId, creatorId, playerCount, aiCount, lastActiveAt, wsClients, gameOverNotified } */
     const rooms = new Map();
     const roomWsServers = new Map(); // roomKey -> WebSocketServer (noServer)
 
@@ -103,8 +103,9 @@ export default {
       broadcast({ type: 'message', room_id: chatRoomId, message_id: Number(result.lastInsertRowid), thread_root: null, message: hydrated }, chatRoomId);
     }
 
-    // ── 建房：全真人房间（aiCount=0，人齐才开局；AI 仅断线托管用） ──
-    async function createRoom(roomKey, chatRoomId, creatorId, playerCount) {
+    // ── 建房：aiCount=0 为全真人房间（人齐才开局；AI 仅断线托管用）；
+    //    aiCount>0 时按指定数量补 AI 座位，真人坐满剩余座位（humanSlots）即开局。 ──
+    async function createRoom(roomKey, chatRoomId, creatorId, playerCount, aiCount) {
       const gameServer = new GameServer({
         host: '127.0.0.1',
         port: 0,
@@ -112,7 +113,7 @@ export default {
         openingHandCount: cfg.openingHandCount,
         autoRestartAfterGameOver: false, // 下一局由真人确认后 requestRestart()
         allowMultiConnectionsPerSource: cfg.allowMultiSource,
-        aiCount: 0, // 空位不由 AI 代占：直到人齐才开局
+        aiCount: aiCount || 0, // 空位不由 AI 代占：直到人齐才开局（aiCount=0）或真人坐满 humanSlots 立即开局（aiCount>0）
         aiDriver: cfg.aiDriver,
         rulesPath: join(PLUGIN_ROOT, 'rules.md'),
       });
@@ -123,13 +124,17 @@ export default {
         chatRoomId,
         creatorId,
         playerCount,
+        aiCount: aiCount || 0,
         lastActiveAt: Date.now(),
         wsClients: new Set(),
         gameOverNotified: false, // 对局结束是否已向聊天室发过「确认续局」公告
       };
       rooms.set(roomKey, room);
       const link = `${publicBaseUrl}/api/sanguosha/?room=${encodeURIComponent(roomKey)}`;
-      postChatMessage(chatRoomId, creatorId, `创建了三国杀${playerCount}人局（全真人，人齐开局）。[点击加入对局](${link})；其他玩家也可直接打开：${link}`);
+      const modeText = aiCount > 0
+        ? `创建了三国杀${playerCount}人局（AI×${aiCount}，${playerCount - aiCount} 名真人即可立即开局）。`
+        : `创建了三国杀${playerCount}人局（全真人，人齐开局）。`;
+      postChatMessage(chatRoomId, creatorId, `${modeText}[点击加入对局](${link})；其他玩家也可直接打开：${link}`);
       return room;
     }
 
@@ -145,10 +150,10 @@ export default {
       }
     }
 
-    // ── 聊天室命令：/sanguosha [玩家数]（全真人）；对局结束时可确认续局 ──
+    // ── 聊天室命令：/sanguosha [玩家数 [AI数]]（AI 数缺省 0 = 全真人，人齐开局；>0 = 立即补 AI 开局）；对局结束时可确认续局 ──
     const onMessageSent = ({ roomId, message, sender }) => {
       const text = String(message?.content || '').trim();
-      const cmd = text.match(/^\/(?:sanguosha|sgs)(?:\s+(\d+))?/);
+      const cmd = text.match(/^\/(?:sanguosha|sgs)(?:\s+(\d+))?(?:\s+(\d+))?\s*$/);
       if (!cmd) return;
       const roomKey = `chat-${roomId}`;
       const existing = rooms.get(roomKey);
@@ -175,11 +180,16 @@ export default {
         return;
       }
       const playerCount = cmd[1] ? Number(cmd[1]) : cfg.defaultPlayers;
+      const aiCount = cmd[2] ? Number(cmd[2]) : 0;
       if (!Number.isInteger(playerCount) || playerCount < 2 || playerCount > 6) {
-        postChatMessage(roomId, sender.id, '玩家数需为 2–6，用法：/sanguosha [玩家数]（全真人，人齐开局）');
+        postChatMessage(roomId, sender.id, '玩家数需为 2–6，用法：/sanguosha [玩家数 [AI数]]（AI 数缺省为 0 = 全真人；如 /sanguosha 4 3 = 4人局3个AI，1 名真人即可立即开局）');
         return;
       }
-      void createRoom(roomKey, roomId, sender.id, playerCount).catch((error) => {
+      if (!Number.isInteger(aiCount) || aiCount < 0 || aiCount >= playerCount) {
+        postChatMessage(roomId, sender.id, 'AI 数需为 0（全真人）到玩家数-1 的整数，至少保留 1 个真人座位');
+        return;
+      }
+      void createRoom(roomKey, roomId, sender.id, playerCount, aiCount).catch((error) => {
         postChatMessage(roomId, sender.id, `创建对局失败：${error instanceof Error ? error.message : String(error)}`);
       });
     };
