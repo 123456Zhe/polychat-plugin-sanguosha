@@ -66,7 +66,14 @@ const DEFAULT_CONFIG = {
 
 function staticFile(req, res, url, name) {
   const ext = name.endsWith('.html') ? '.html' : name.slice(name.lastIndexOf('.'));
-  const body = readFileSync(join(PLUGIN_ROOT, 'webui', name));
+  let body;
+  try {
+    body = readFileSync(join(PLUGIN_ROOT, 'webui', name));
+  } catch {
+    res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
+    res.end('{"error":"页面不存在"}');
+    return true;
+  }
   res.writeHead(200, { 'content-type': MIME[ext] || 'application/octet-stream', 'cache-control': 'no-cache' });
   res.end(body);
   return true;
