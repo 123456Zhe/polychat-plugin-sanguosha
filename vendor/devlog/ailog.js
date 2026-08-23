@@ -3,11 +3,17 @@ import { resolve } from "node:path";
 const logDir = resolve(process.cwd(), "devlog");
 const logFile = resolve(logDir, "ai-log.md");
 const ensureLogFile = () => {
-    if (!existsSync(logDir)) {
-        mkdirSync(logDir, { recursive: true });
+    try {
+        if (!existsSync(logDir)) {
+            mkdirSync(logDir, { recursive: true });
+        }
+        if (!existsSync(logFile)) {
+            appendFileSync(logFile, "# AI 决策日志\n\n", "utf-8");
+        }
     }
-    if (!existsSync(logFile)) {
-        appendFileSync(logFile, "# AI 决策日志\n\n", "utf-8");
+    catch {
+        // 日志目录不可写（如嵌入宿主且 cwd 只读）或写入失败时静默跳过：
+        // AI 决策日志仅用于开发调试，绝不允许影响对局。
     }
 };
 const estimateTokens = (text) => {
@@ -24,31 +30,36 @@ const formatPrompt = (prompt) => prompt
 })
     .join("\n");
 export const writeAiLog = (entry) => {
-    ensureLogFile();
-    const timestamp = new Date().toISOString();
-    const promptText = entry.prompt.map((item) => item.content).join("\n");
-    const estimatedPromptTokens = estimateTokens(promptText);
-    const estimatedResponseTokens = estimateTokens(entry.responseText);
-    const promptTokens = entry.promptTokens ?? estimatedPromptTokens;
-    const completionTokens = entry.completionTokens ?? estimatedResponseTokens;
-    const totalTokens = entry.totalTokens ?? promptTokens + completionTokens;
-    const lines = [
-        `## ${timestamp} | ${entry.provider.toUpperCase()} | ${entry.stage}`,
-        `- player: ${entry.playerName} (${entry.playerId})`,
-        `- model: ${entry.model}`,
-        `- prompt_tokens: ${promptTokens} (estimated=${estimatedPromptTokens})`,
-        `- completion_tokens: ${completionTokens} (estimated=${estimatedResponseTokens})`,
-        `- total_tokens: ${totalTokens}`,
-        entry.error ? `- error: ${entry.error}` : "- error: none",
-        "",
-        "### Prompt",
-        formatPrompt(entry.prompt),
-        "",
-        "### Response",
-        "```text",
-        entry.responseText || "(empty)",
-        "```",
-        "",
-    ];
-    appendFileSync(logFile, `${lines.join("\n")}\n`, "utf-8");
+    try {
+        ensureLogFile();
+        const timestamp = new Date().toISOString();
+        const promptText = entry.prompt.map((item) => item.content).join("\n");
+        const estimatedPromptTokens = estimateTokens(promptText);
+        const estimatedResponseTokens = estimateTokens(entry.responseText);
+        const promptTokens = entry.promptTokens ?? estimatedPromptTokens;
+        const completionTokens = entry.completionTokens ?? estimatedResponseTokens;
+        const totalTokens = entry.totalTokens ?? promptTokens + completionTokens;
+        const lines = [
+            `## ${timestamp} | ${entry.provider.toUpperCase()} | ${entry.stage}`,
+            `- player: ${entry.playerName} (${entry.playerId})`,
+            `- model: ${entry.model}`,
+            `- prompt_tokens: ${promptTokens} (estimated=${estimatedPromptTokens})`,
+            `- completion_tokens: ${completionTokens} (estimated=${estimatedResponseTokens})`,
+            `- total_tokens: ${totalTokens}`,
+            entry.error ? `- error: ${entry.error}` : "- error: none",
+            "",
+            "### Prompt",
+            formatPrompt(entry.prompt),
+            "",
+            "### Response",
+            "```text",
+            entry.responseText || "(empty)",
+            "```",
+            "",
+        ];
+        appendFileSync(logFile, `${lines.join("\n")}\n`, "utf-8");
+    }
+    catch {
+        // 日志写入失败（磁盘/权限/路径问题）绝不允许影响对局
+    }
 };

@@ -51,7 +51,17 @@ const normalizeAiDecision = (game, playerId, decision) => {
  * aiLoop 传 null 表示强制只用本地策略（simple 模式）。
  */
 export const pickAiTurnDecision = async (game, playerId, aiLoop, localAiEngine) => {
-    const modelDecision = aiLoop ? await aiLoop.decide(game, playerId) : null;
+    // LLM 决策的任何意外异常（网络、解析、日志副作用等）都不得中断对局：
+    // 捕获后回退本地策略，并把失败原因交给上层记录。
+    let modelDecision = null;
+    if (aiLoop) {
+        try {
+            modelDecision = await aiLoop.decide(game, playerId);
+        }
+        catch (error) {
+            aiLoop.lastFailureReason = error instanceof Error ? error.message : String(error);
+        }
+    }
     const localDecision = localAiEngine.decide(game, playerId);
     const fallbackDecision = localDecision
         ? localDecision.targetId
