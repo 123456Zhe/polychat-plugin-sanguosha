@@ -16,12 +16,5 @@ cp -f "$PATCH_DIR/vendor/devlog/ailog.js"        "$REPO_DIR/vendor/devlog/ailog.
 cp -f "$PATCH_DIR/vendor/agent/turn-decision.js" "$REPO_DIR/vendor/agent/turn-decision.js"
 log "vendor 补丁已应用：ailog.js, turn-decision.js"
 
-# webui 修复（页面挂载即自动连接等；构建产物直接覆盖，避免依赖上游重建）
-if [ -d "$PATCH_DIR/webui" ]; then
-  cp -f "$PATCH_DIR/webui/index.html" "$REPO_DIR/webui/index.html"
-  rm -f "$REPO_DIR/webui/assets/"*
-  cp -f "$PATCH_DIR/webui/assets/"* "$REPO_DIR/webui/assets/"
-  log "webui 补丁已应用：$(ls "$PATCH_DIR/webui/assets")"
-fi
 
 log "完成"
