@@ -174,7 +174,7 @@ export async function useSkillAction(ctx, playerId, action, targetId) {
         ctx.discardPile.push(discarded);
         markSkillUsed(ctx, player.id, SkillName.Assault);
         const logs = [` 发动，弃置 `];
-        await ctx.applyDamage(player, target, 1, SkillName.Assault, logs);
+        await ctx.applyDamage(player, target, 1, SkillName.Assault, logs, discarded);
         logs.push(...(await ctx.resolveDeaths()));
         logs.push(...ctx.resolveWinner());
         await ctx.advanceIfCurrentPlayerDead(logs);
@@ -316,7 +316,7 @@ export async function useSkillAction(ctx, playerId, action, targetId) {
             sources: player.hand.map((handCard, index) => ({
                 sourceId: `hand:${handCard.id}`,
                 origin: "hand",
-                card: handCard,
+                // 故意不带 card：这是周瑜的手牌，目标只能盲选，牌面不能发给客户端
                 label: `${player.name} 的手牌 ${index + 1}`,
             })),
             count: 1,

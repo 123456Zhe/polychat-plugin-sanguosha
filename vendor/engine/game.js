@@ -1,8 +1,8 @@
 import { CardType, CARD_LIBRARY_SUMMARY, createDeck, shuffle } from "./cards.js";
-import { cardNeedsTarget as cardNeedsTargetImpl, hasRemovableCard, isDelayedTrickCard as isDelayedTrickCardImpl, isEquipCard as isEquipCardImpl, isNonDelayedTrickCard as isNonDelayedTrickCardImpl, isSlashCard as isSlashCardImpl, } from "./card-utils.js";
+import { attributeDamageKind, cardNeedsTarget as cardNeedsTargetImpl, describeCard, hasRemovableCard, isDelayedTrickCard as isDelayedTrickCardImpl, isEquipCard as isEquipCardImpl, isNonDelayedTrickCard as isNonDelayedTrickCardImpl, isSlashCard as isSlashCardImpl, slashKindOf, } from "./card-utils.js";
 import { pickBestAiAction, pickBestTarget, } from "./ai-heuristics.js";
 import { buildRoleList, getAiName, getRoleDistribution, GENERAL_LIBRARY, pickRandomUnusedGeneral, resolveGeneralByName, } from "./generals.js";
-import { canReachForSlash as canReachForSlashImpl, createCard as createCardImpl, discardSelfCards as discardSelfCardsImpl, expandSlashTargets as expandSlashTargetsImpl, removeRandomCardFromPlayer as removeRandomCardFromPlayerImpl, resolveArrowRain as resolveArrowRainImpl, resolveBarbarian as resolveBarbarianImpl, resolveCollateral as resolveCollateralImpl, resolveDeaths as resolveDeathsImpl, resolveDelayedJudgments as resolveDelayedJudgmentsImpl, resolveDelayedTrick as resolveDelayedTrickImpl, resolveDismantle as resolveDismantleImpl, resolveDuel as resolveDuelImpl, resolveEquip as resolveEquipImpl, resolveHarvest as resolveHarvestImpl, resolvePeachGarden as resolvePeachGardenImpl, resolveSingleDelayedJudgment as resolveSingleDelayedJudgmentImpl, resolveSlash as resolveSlashImpl, resolveSnatch as resolveSnatchImpl, resolveWinner as resolveWinnerImpl, } from "./resolve.js";
+import { canReachForSlash as canReachForSlashImpl, createCard as createCardImpl, discardSelfCards as discardSelfCardsImpl, expandSlashTargets as expandSlashTargetsImpl, removeRandomCardFromPlayer as removeRandomCardFromPlayerImpl, resolveArrowRain as resolveArrowRainImpl, resolveBarbarian as resolveBarbarianImpl, resolveCollateral as resolveCollateralImpl, resolveDeaths as resolveDeathsImpl, resolveDelayedJudgments as resolveDelayedJudgmentsImpl, resolveDelayedTrick as resolveDelayedTrickImpl, resolveDismantle as resolveDismantleImpl, resolveDuel as resolveDuelImpl, resolveEquip as resolveEquipImpl, resolveFireAttack as resolveFireAttackImpl, resolveHarvest as resolveHarvestImpl, resolveIronChain as resolveIronChainImpl, resolvePeachGarden as resolvePeachGardenImpl, resolveSingleDelayedJudgment as resolveSingleDelayedJudgmentImpl, resolveSlash as resolveSlashImpl, resolveSnatch as resolveSnatchImpl, resolveWinner as resolveWinnerImpl, } from "./resolve.js";
 import { createSkillHooks } from "./skill-hooks.js";
 import { canPlaySlashInTurn as canPlaySlashInTurnImpl, canUseAssault as canUseAssaultImpl, canUseFanJian as canUseFanJianImpl, canUseJieYin as canUseJieYinImpl, canUseKuRou as canUseKuRouImpl, canUseLiJian as canUseLiJianImpl, canUseQingNang as canUseQingNangImpl, canUseRenDe as canUseRenDeImpl, canUseZhiBa as canUseZhiBaImpl, canUseZhiHeng as canUseZhiHengImpl, getLordWithZhiBa as getLordWithZhiBaImpl, hasSkill as playerHasSkill, isSkillUsed as playerIsSkillUsed, markSkillUsed as playerMarkSkillUsed, resetTurnSkillState as playerResetTurnSkillState, shouldActivateOptionalEffect as playerShouldActivateOptionalEffect, useSkillAction as useSkillActionImpl, } from "./skills.js";
 import { PlayerRole, SkillName, TurnPhase, } from "./types.js";
@@ -25,6 +25,10 @@ export class SanGuoGame {
     turn;
     phase;
     slashUsedThisTurn;
+    /** 本回合已获得"下一张杀伤害+1"的玩家（酒方法Ⅰ） */
+    wineBuffPlayerIds;
+    /** 本回合已使用过酒（方法Ⅰ）的玩家，每回合限一次 */
+    wineUsedPlayerIds;
     winner;
     rng;
     skillUsedThisTurn;
@@ -52,6 +56,8 @@ export class SanGuoGame {
         this.turn = 1;
         this.phase = TurnPhase.Draw;
         this.slashUsedThisTurn = false;
+        this.wineBuffPlayerIds = new Set();
+        this.wineUsedPlayerIds = new Set();
         this.winner = null;
         this.skillUsedThisTurn = new Map();
         this.skillCountsThisTurn = new Map();
@@ -99,6 +105,8 @@ export class SanGuoGame {
         this.phase = TurnPhase.Draw;
         this.winner = null;
         this.slashUsedThisTurn = false;
+        this.wineBuffPlayerIds = new Set();
+        this.wineUsedPlayerIds = new Set();
         this.skillUsedThisTurn = new Map();
         this.skillCountsThisTurn = new Map();
         this.skillFlagsThisTurn = new Map();
@@ -144,6 +152,8 @@ export class SanGuoGame {
         this.phase = TurnPhase.Draw;
         this.winner = null;
         this.slashUsedThisTurn = false;
+        this.wineBuffPlayerIds = new Set();
+        this.wineUsedPlayerIds = new Set();
         this.skillUsedThisTurn = new Map();
         this.skillCountsThisTurn = new Map();
         this.skillFlagsThisTurn = new Map();
@@ -249,6 +259,10 @@ export class SanGuoGame {
             if (card.type === CardType.Lightning && player.delayedTricks.some((t) => t.cardType === CardType.Lightning)) {
                 return;
             }
+            // 酒方法Ⅰ：每回合限用一次
+            if (card.type === CardType.Wine && this.wineUsedPlayerIds.has(player.id)) {
+                return;
+            }
             const targets = this.findTargetsByCard(player.id, card.type);
             if (this.cardNeedsTarget(card.type) && targets.length === 0) {
                 return;
@@ -259,7 +273,20 @@ export class SanGuoGame {
                 label: `使用 ${card.type}`,
                 requiresTarget: this.cardNeedsTarget(card.type),
                 targets,
+                // 顺手牵羊/过河拆桥结算时需要从目标处选一张牌，其他牌不需要
+                needsTargetCard: card.type === CardType.Snatch || card.type === CardType.Dismantle,
             });
+            // 铁索连环可重铸：弃置并摸一张
+            if (card.type === CardType.IronChain) {
+                actions.push({
+                    type: "play",
+                    cardIndex: -500 - cardIndex,
+                    label: `重铸 ${card.type}（弃置并摸1张牌）`,
+                    requiresTarget: false,
+                    targets: [],
+                    needsTargetCard: false,
+                });
+            }
         });
         if (canPlaySlash && this.hasSkill(player, SkillName.LongDan)) {
             player.hand.forEach((card, cardIndex) => {
@@ -352,6 +379,10 @@ export class SanGuoGame {
                 });
             }
             player.treasureCards.forEach((card, index) => {
+                // 木牛流马下的杀同样受每回合出杀次数限制
+                if (this.isSlashCard(card.type) && !this.canPlaySlashInTurn(player)) {
+                    return;
+                }
                 const targets = this.findTargetsByCard(player.id, card.type);
                 if (this.cardNeedsTarget(card.type) && targets.length === 0) {
                     return;
@@ -362,6 +393,7 @@ export class SanGuoGame {
                     label: `使用 木牛流马下的 ${card.type}`,
                     requiresTarget: this.cardNeedsTarget(card.type),
                     targets,
+                    needsTargetCard: card.type === CardType.Snatch || card.type === CardType.Dismantle,
                 });
             });
             if (player.treasureCards.length > 0) {
@@ -659,7 +691,26 @@ export class SanGuoGame {
             this.discardPile.push(used);
             this.slashUsedThisTurn = true;
             const logs = [`${player.name} 发动${SkillName.LongDan}，将${CardType.Dodge}当${CardType.Slash}使用`];
-            logs.push(...(await this.resolveSlash(player, target, false, false, used.color === "red")));
+            logs.push(...(await this.resolveSlash(player, target, false, slashKindOf(player, used.type), used)));
+            logs.push(...(await this.resolveDeaths()));
+            logs.push(...this.resolveWinner());
+            await this.advanceIfCurrentPlayerDead(logs);
+            return logs;
+        }
+        if (action.cardIndex <= -500 && action.cardIndex > -1000) {
+            // 铁索连环重铸：弃置此牌并摸一张
+            const index = -500 - action.cardIndex;
+            const card = player.hand[index];
+            if (!card || card.type !== CardType.IronChain) {
+                return [`${player.name} 当前无法重铸${CardType.IronChain}`];
+            }
+            const removed = await this.removeHandCardAt(player, index);
+            if (!removed) {
+                return ["使用卡牌失败"];
+            }
+            this.discardPile.push(removed);
+            const drawn = this.drawCards(player.id, 1);
+            const logs = [`${player.name} 重铸${CardType.IronChain}，摸了 ${drawn} 张牌`];
             logs.push(...(await this.resolveDeaths()));
             logs.push(...this.resolveWinner());
             await this.advanceIfCurrentPlayerDead(logs);
@@ -691,7 +742,7 @@ export class SanGuoGame {
             this.discardPile.push(used);
             this.slashUsedThisTurn = true;
             const logs = [`${player.name} 发动${SkillName.WuSheng}，将红色${used.type}当${CardType.Slash}使用`];
-            logs.push(...(await this.resolveSlash(player, target, false, false, true)));
+            logs.push(...(await this.resolveSlash(player, target, false, slashKindOf(player, used.type), used)));
             logs.push(...(await this.resolveDeaths()));
             logs.push(...this.resolveWinner());
             await this.advanceIfCurrentPlayerDead(logs);
@@ -745,6 +796,11 @@ export class SanGuoGame {
                 return [`${player.name} 当前无法使用${CardType.WoodenOx}下的牌`];
             }
             const index = -1000 - action.cardIndex;
+            const preview = player.treasureCards[index];
+            // 木牛流马下的杀同样受每回合出杀次数限制（防客户端绕过可玩动作列表）
+            if (preview && this.isSlashCard(preview.type) && !this.canPlaySlashInTurn(player)) {
+                return [`${player.name} 本回合已使用过杀`];
+            }
             const usedCard = player.treasureCards.splice(index, 1)[0];
             if (!usedCard) {
                 return ["使用卡牌失败"];
@@ -777,7 +833,7 @@ export class SanGuoGame {
             }
             const logs = [
                 `${player.name} 发动丈八蛇矛，弃置 ${first.type}、${second.type} 视为使用杀`,
-                ...(await this.resolveSlash(player, target, true)),
+                ...(await this.resolveSlash(player, target, true, slashKindOf(player, undefined))),
             ];
             return logs;
         }
@@ -834,12 +890,18 @@ export class SanGuoGame {
             }
             const slashTargets = await this.expandSlashTargets(player, this.mustGetPlayer(targetId), player.hand.length === 0);
             for (const slashTarget of slashTargets) {
-                logs.push(...(await this.resolveSlash(player, slashTarget, false, usedCard.type === CardType.FireSlash, usedCard.color === "red")));
+                logs.push(...(await this.resolveSlash(player, slashTarget, false, slashKindOf(player, usedCard.type), usedCard)));
             }
         }
         else if (usedCard.type === CardType.Peach) {
             player.hp = Math.min(player.maxHp, player.hp + 1);
             logs.push(`${player.name} 使用桃，回复 1 点体力`);
+        }
+        else if (usedCard.type === CardType.Wine) {
+            // 方法Ⅰ：出牌阶段对自己使用，本回合下一张杀伤害+1（每回合限一次，由可玩动作列表保证）
+            this.wineUsedPlayerIds.add(player.id);
+            this.wineBuffPlayerIds.add(player.id);
+            logs.push(`${player.name} 使用酒，本回合下一张杀伤害+1`);
         }
         else if (usedCard.type === CardType.Dismantle && targetId) {
             logs.push(...(await this.resolveDismantle(player, this.mustGetPlayer(targetId), selectedCardId)));
@@ -848,17 +910,23 @@ export class SanGuoGame {
             logs.push(...(await this.resolveSnatch(player, this.mustGetPlayer(targetId), selectedCardId)));
         }
         else if (usedCard.type === CardType.Duel && targetId) {
-            logs.push(...(await this.resolveDuel(player, this.mustGetPlayer(targetId))));
+            logs.push(...(await this.resolveDuel(player, this.mustGetPlayer(targetId), usedCard)));
         }
         else if (usedCard.type === CardType.ExNihilo) {
             const drawn = this.drawCards(player.id, 2);
             logs.push(`${player.name} 使用无中生有，摸了 ${drawn} 张牌`);
         }
         else if (usedCard.type === CardType.Barbarian) {
-            logs.push(...(await this.resolveBarbarian(player)));
+            logs.push(...(await this.resolveBarbarian(player, usedCard)));
         }
         else if (usedCard.type === CardType.ArrowRain) {
-            logs.push(...(await this.resolveArrowRain(player)));
+            logs.push(...(await this.resolveArrowRain(player, usedCard)));
+        }
+        else if (usedCard.type === CardType.FireAttack && targetId) {
+            logs.push(...(await this.resolveFireAttack(player, this.mustGetPlayer(targetId), usedCard)));
+        }
+        else if (usedCard.type === CardType.IronChain && targetId) {
+            logs.push(...(await this.resolveIronChain(player, this.mustGetPlayer(targetId))));
         }
         else if (usedCard.type === CardType.Collateral && targetId) {
             logs.push(...(await this.resolveCollateral(player, this.mustGetPlayer(targetId))));
@@ -1008,10 +1076,10 @@ export class SanGuoGame {
     buildUsableSources(player) {
         const sources = [];
         for (const card of player.hand) {
-            sources.push({ sourceId: `hand:${card.id}`, origin: "hand", card, label: card.type });
+            sources.push({ sourceId: `hand:${card.id}`, origin: "hand", card, label: describeCard(card) });
         }
         for (const card of player.treasureCards) {
-            sources.push({ sourceId: `treasure:${card.id}`, origin: "treasure", card, label: `${card.type}（木牛流马）` });
+            sources.push({ sourceId: `treasure:${card.id}`, origin: "treasure", card, label: `${describeCard(card)}（木牛流马）` });
         }
         return sources;
     }
@@ -1060,20 +1128,20 @@ export class SanGuoGame {
         const sources = [];
         for (const source of all) {
             if (source.card.type === CardType.Dodge) {
-                sources.push({ ...source, label: `打出${CardType.Dodge}${source.origin === "treasure" ? "（木牛流马）" : ""}` });
+                sources.push({ ...source, label: `打出${describeCard(source.card)}${source.origin === "treasure" ? "（木牛流马）" : ""}` });
             }
         }
         if (this.hasSkill(player, SkillName.QingGuo)) {
             for (const source of all) {
                 if (source.card.color === "black" && source.card.type !== CardType.Dodge) {
-                    sources.push({ ...source, label: `${SkillName.QingGuo}当${CardType.Dodge}` });
+                    sources.push({ ...source, label: `${describeCard(source.card)}${SkillName.QingGuo}当${CardType.Dodge}` });
                 }
             }
         }
         if (this.hasSkill(player, SkillName.LongDan)) {
             for (const source of all) {
                 if (this.isSlashCard(source.card.type)) {
-                    sources.push({ ...source, label: `${SkillName.LongDan}当${CardType.Dodge}` });
+                    sources.push({ ...source, label: `${describeCard(source.card)}${SkillName.LongDan}当${CardType.Dodge}` });
                 }
             }
         }
@@ -1084,20 +1152,20 @@ export class SanGuoGame {
         const sources = [];
         for (const source of all) {
             if (this.isSlashCard(source.card.type)) {
-                sources.push({ ...source, label: `打出${source.card.type}${source.origin === "treasure" ? "（木牛流马）" : ""}` });
+                sources.push({ ...source, label: `打出${describeCard(source.card)}${source.origin === "treasure" ? "（木牛流马）" : ""}` });
             }
         }
         if (this.hasSkill(player, SkillName.WuSheng)) {
             for (const source of all) {
                 if (source.card.color === "red" && !this.isSlashCard(source.card.type)) {
-                    sources.push({ ...source, label: `${SkillName.WuSheng}当${CardType.Slash}` });
+                    sources.push({ ...source, label: `${describeCard(source.card)}${SkillName.WuSheng}当${CardType.Slash}` });
                 }
             }
         }
         if (this.hasSkill(player, SkillName.LongDan)) {
             for (const source of all) {
                 if (source.card.type === CardType.Dodge) {
-                    sources.push({ ...source, label: `${SkillName.LongDan}当${CardType.Slash}` });
+                    sources.push({ ...source, label: `${describeCard(source.card)}${SkillName.LongDan}当${CardType.Slash}` });
                 }
             }
         }
@@ -1106,33 +1174,41 @@ export class SanGuoGame {
     buildNegateSources(player) {
         return this.buildUsableSources(player)
             .filter((source) => source.card.type === CardType.Negate)
-            .map((source) => ({ ...source, label: `打出${CardType.Negate}${source.origin === "treasure" ? "（木牛流马）" : ""}` }));
+            .map((source) => ({ ...source, label: `打出${describeCard(source.card)}${source.origin === "treasure" ? "（木牛流马）" : ""}` }));
     }
-    buildPeachSources(player) {
+    buildPeachSources(player, selfRescue = false) {
         const all = this.buildUsableSources(player);
         const sources = [];
         for (const source of all) {
             if (source.card.type === CardType.Peach) {
-                sources.push({ ...source, label: `使用${CardType.Peach}${source.origin === "treasure" ? "（木牛流马）" : ""}` });
+                sources.push({ ...source, label: `使用${describeCard(source.card)}${source.origin === "treasure" ? "（木牛流马）" : ""}` });
+            }
+        }
+        if (selfRescue) {
+            // 酒方法Ⅱ：濒死时可将酒当桃对自己使用（仅自救）
+            for (const source of all) {
+                if (source.card.type === CardType.Wine) {
+                    sources.push({ ...source, label: `使用${describeCard(source.card)}自救（当${CardType.Peach}）` });
+                }
             }
         }
         if (this.hasSkill(player, SkillName.JiJiu) && player.id !== this.currentPlayer.id) {
             for (const source of all) {
                 if (source.card.color === "red" && source.card.type !== CardType.Peach) {
-                    sources.push({ ...source, label: `${SkillName.JiJiu}当${CardType.Peach}` });
+                    sources.push({ ...source, label: `${describeCard(source.card)}${SkillName.JiJiu}当${CardType.Peach}` });
                 }
             }
         }
         return sources;
     }
-    buildResponseSources(player, kind) {
+    buildResponseSources(player, kind, selfRescue = false) {
         if (kind === "dodge")
             return this.buildDodgeSources(player);
         if (kind === "slash")
             return this.buildSlashSources(player);
         if (kind === "negate")
             return this.buildNegateSources(player);
-        return this.buildPeachSources(player);
+        return this.buildPeachSources(player, selfRescue);
     }
     async consumeResponseCard(player, kind, sourceId, logs) {
         const source = this.peekUsableCard(player, sourceId);
@@ -1140,13 +1216,15 @@ export class SanGuoGame {
             return false;
         }
         const card = source.card;
+        // 酒方法Ⅱ：濒死者本人可将酒当桃使用（仅自救，他人救援只能用桃）
+        const wineAsPeach = kind === "peach" && card.type === CardType.Wine && player.hp <= 0;
         const direct = kind === "dodge"
             ? card.type === CardType.Dodge
             : kind === "slash"
                 ? this.isSlashCard(card.type)
                 : kind === "negate"
                     ? card.type === CardType.Negate
-                    : card.type === CardType.Peach;
+                    : card.type === CardType.Peach || wineAsPeach;
         if (!direct) {
             const convertedLabel = kind === "dodge" && card.color === "black" && this.hasSkill(player, SkillName.QingGuo)
                 ? `${SkillName.QingGuo}当${CardType.Dodge}`
@@ -1169,6 +1247,9 @@ export class SanGuoGame {
             return false;
         }
         this.discardPile.push(removed);
+        if (wineAsPeach) {
+            logs.push(`${player.name} 使用酒自救（当${CardType.Peach}）`);
+        }
         return true;
     }
     async requestCardResponse(player, kind, trigger, logs) {
@@ -1181,7 +1262,9 @@ export class SanGuoGame {
         if (selection) {
             return await this.consumeSelectedResponse(player, kind, selection, logs);
         }
-        const sources = this.buildResponseSources(player, kind);
+        // 酒方法Ⅱ：濒死者本人可将酒当桃自救
+        const selfRescue = kind === "peach" && trigger.actorId === player.id;
+        const sources = this.buildResponseSources(player, kind, selfRescue);
         if (sources.length === 0) {
             return false;
         }
@@ -1417,6 +1500,8 @@ export class SanGuoGame {
         }
         this.phase = TurnPhase.Judgment;
         this.slashUsedThisTurn = false;
+        this.wineBuffPlayerIds = new Set();
+        this.wineUsedPlayerIds = new Set();
         const player = this.currentPlayer;
         const logs = [`第 ${this.turn} 回合：${player.name} 的回合`, `进入${TurnPhase.Judgment}`];
         if (player.delayedTricks.length > 0) {
@@ -1571,6 +1656,14 @@ export class SanGuoGame {
                 return !holder.delayedTricks.some((t) => t.cardType === cardType);
             });
         }
+        if (cardType === CardType.FireAttack) {
+            // 火攻：对一名其他角色使用，无距离限制
+            return targets;
+        }
+        if (cardType === CardType.IronChain) {
+            // 铁索连环：可对包括自己在内的存活角色使用
+            return this.players.filter((player) => player.alive).map((player) => player.id);
+        }
         return targets;
     }
     drawCards(playerId, count) {
@@ -1716,6 +1809,7 @@ export class SanGuoGame {
             delayedTricks: [],
             alive: true,
             faceDown: false,
+            chained: false,
         };
     }
     mustGetPlayer(id) {
@@ -1807,12 +1901,13 @@ export class SanGuoGame {
             await hook(payload, logs);
         }
     }
-    async applyDamage(source, target, amount, reason, logs) {
+    async applyDamage(source, target, amount, reason, logs, damageCard, damageKind, isChainSpread = false) {
         const payload = {
             source,
             target,
             damage: amount,
             reason,
+            ...(damageCard ? { card: damageCard } : {}),
         };
         await this.emitSkillTrigger("before_damage", payload, logs);
         let finalDamage = Math.max(0, payload.damage ?? 0);
@@ -1826,6 +1921,18 @@ export class SanGuoGame {
         }
         target.hp -= finalDamage;
         logs.push(`${target.name} 受到 ${finalDamage} 点伤害，当前体力 ${Math.max(target.hp, 0)}`);
+        // 铁索连环传导：处于连环状态的角色受到属性伤害时，其他连环角色受到等量同属性伤害（单波次，不递归）
+        if (!isChainSpread && target.chained) {
+            const kind = damageKind ?? attributeDamageKind(damageCard?.type);
+            if (kind) {
+                const kindLabel = kind === "fire" ? "火焰" : "雷电";
+                const others = this.players.filter((p) => p.alive && p.chained && p.id !== target.id);
+                for (const other of others) {
+                    logs.push(`铁索连环传导：${other.name} 受到 ${finalDamage} 点${kindLabel}伤害`);
+                    await this.applyDamage(source, other, finalDamage, "铁索连环", logs, damageCard, kind, true);
+                }
+            }
+        }
         await this.emitSkillTrigger("after_damage", payload, logs);
     }
     isKongChengProtected(target, cardType) {
@@ -1870,6 +1977,14 @@ export class SanGuoGame {
     }
     canPlaySlashInTurn(player) {
         return canPlaySlashInTurnImpl(this, player);
+    }
+    /** 酒方法Ⅰ：若玩家有"下一张杀伤害+1"增益则消耗并返回 true */
+    consumeWineBuff(player) {
+        if (this.wineBuffPlayerIds.has(player.id)) {
+            this.wineBuffPlayerIds.delete(player.id);
+            return true;
+        }
+        return false;
     }
     canUseAssault(player) {
         return canUseAssaultImpl(this, player);
@@ -1934,8 +2049,8 @@ export class SanGuoGame {
     async expandSlashTargets(player, primary, isLastHandSlash) {
         return expandSlashTargetsImpl(this, player, primary, isLastHandSlash);
     }
-    resolveSlash(attacker, target, fromSerpent = false, fire = false, redSlash = false) {
-        return resolveSlashImpl(this, attacker, target, fromSerpent, fire, redSlash);
+    resolveSlash(attacker, target, fromSerpent = false, kind = "normal", damageCard) {
+        return resolveSlashImpl(this, attacker, target, fromSerpent, kind, damageCard);
     }
     resolveDismantle(user, target, selectedCardId) {
         return resolveDismantleImpl(this, user, target, selectedCardId);
@@ -1943,14 +2058,20 @@ export class SanGuoGame {
     resolveSnatch(user, target, selectedCardId) {
         return resolveSnatchImpl(this, user, target, selectedCardId);
     }
-    resolveDuel(user, target) {
-        return resolveDuelImpl(this, user, target);
+    resolveDuel(user, target, duelCard) {
+        return resolveDuelImpl(this, user, target, duelCard);
     }
-    resolveBarbarian(user) {
-        return resolveBarbarianImpl(this, user);
+    resolveBarbarian(user, trickCard) {
+        return resolveBarbarianImpl(this, user, trickCard);
     }
-    resolveArrowRain(user) {
-        return resolveArrowRainImpl(this, user);
+    resolveArrowRain(user, trickCard) {
+        return resolveArrowRainImpl(this, user, trickCard);
+    }
+    resolveFireAttack(user, target, usedCard) {
+        return resolveFireAttackImpl(this, user, target, usedCard);
+    }
+    resolveIronChain(user, target) {
+        return resolveIronChainImpl(this, user, target);
     }
     resolveCollateral(user, target) {
         return resolveCollateralImpl(this, user, target);

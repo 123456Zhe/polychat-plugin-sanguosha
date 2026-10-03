@@ -189,8 +189,35 @@ export function createSkillHooks(ctx) {
                     logs.push(...await ctx.removeRandomCardFromPlayer(source, "获得", target));
                 }
                 if (ctx.hasSkill(target, SkillName.JianXiong) && await ctx.shouldActivateOptionalEffect(target, SkillName.JianXiong)) {
-                    const drawn = ctx.drawCards(target.id, 1);
-                    logs.push(`${target.name} 的${SkillName.JianXiong}生效，摸了 ${drawn} 张牌`);
+                    // 原版奸雄：获得造成本次伤害的牌（通常已在弃牌堆；闪电等在判定区）
+                    const damageCard = payload.card;
+                    let taken;
+                    if (damageCard) {
+                        const discardIdx = ctx.discardPile.findIndex((card) => card.id === damageCard.id);
+                        if (discardIdx >= 0) {
+                            taken = ctx.discardPile.splice(discardIdx, 1)[0];
+                        }
+                        else {
+                            for (const player of ctx.players) {
+                                const trickIdx = player.delayedTricks.findIndex((trick) => trick.card?.id === damageCard.id);
+                                if (trickIdx >= 0) {
+                                    const trick = player.delayedTricks[trickIdx];
+                                    if (trick?.card) {
+                                        player.delayedTricks.splice(trickIdx, 1);
+                                        taken = trick.card;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if (taken) {
+                        target.hand.push(taken);
+                        logs.push(`${target.name} 的${SkillName.JianXiong}生效，获得了 ${taken.type}`);
+                    }
+                    else {
+                        logs.push(`${target.name} 的${SkillName.JianXiong}生效，但没有可获得的牌`);
+                    }
                 }
                 if (ctx.hasSkill(target, SkillName.YiJi) && await ctx.shouldActivateOptionalEffect(target, SkillName.YiJi)) {
                     const drawn = ctx.drawCards(target.id, 2);
