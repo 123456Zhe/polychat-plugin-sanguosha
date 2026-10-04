@@ -2,7 +2,7 @@ import { CardType, CARD_LIBRARY_SUMMARY, createDeck, shuffle } from "./cards.js"
 import { attributeDamageKind, cardNeedsTarget as cardNeedsTargetImpl, describeCard, hasRemovableCard, isDelayedTrickCard as isDelayedTrickCardImpl, isEquipCard as isEquipCardImpl, isNonDelayedTrickCard as isNonDelayedTrickCardImpl, isSlashCard as isSlashCardImpl, slashKindOf, } from "./card-utils.js";
 import { pickBestAiAction, pickBestTarget, } from "./ai-heuristics.js";
 import { buildRoleList, getAiName, getRoleDistribution, GENERAL_LIBRARY, pickRandomUnusedGeneral, resolveGeneralByName, } from "./generals.js";
-import { canReachForSlash as canReachForSlashImpl, createCard as createCardImpl, discardSelfCards as discardSelfCardsImpl, expandSlashTargets as expandSlashTargetsImpl, removeRandomCardFromPlayer as removeRandomCardFromPlayerImpl, resolveArrowRain as resolveArrowRainImpl, resolveBarbarian as resolveBarbarianImpl, resolveCollateral as resolveCollateralImpl, resolveDeaths as resolveDeathsImpl, resolveDelayedJudgments as resolveDelayedJudgmentsImpl, resolveDelayedTrick as resolveDelayedTrickImpl, resolveDismantle as resolveDismantleImpl, resolveDuel as resolveDuelImpl, resolveEquip as resolveEquipImpl, resolveFireAttack as resolveFireAttackImpl, resolveHarvest as resolveHarvestImpl, resolveIronChain as resolveIronChainImpl, resolvePeachGarden as resolvePeachGardenImpl, resolveSingleDelayedJudgment as resolveSingleDelayedJudgmentImpl, resolveSlash as resolveSlashImpl, resolveSnatch as resolveSnatchImpl, resolveWinner as resolveWinnerImpl, } from "./resolve.js";
+import { canReachForSlash as canReachForSlashImpl, createCard as createCardImpl, discardSelfCards as discardSelfCardsImpl, discardWoodenOxStoredCards as discardWoodenOxStoredCardsImpl, expandSlashTargets as expandSlashTargetsImpl, onLoseEquip as onLoseEquipImpl, removeRandomCardFromPlayer as removeRandomCardFromPlayerImpl, resolveArrowRain as resolveArrowRainImpl, resolveBarbarian as resolveBarbarianImpl, resolveCollateral as resolveCollateralImpl, resolveDeaths as resolveDeathsImpl, resolveDelayedJudgments as resolveDelayedJudgmentsImpl, resolveDelayedTrick as resolveDelayedTrickImpl, resolveDismantle as resolveDismantleImpl, resolveDuel as resolveDuelImpl, resolveEquip as resolveEquipImpl, resolveFireAttack as resolveFireAttackImpl, resolveHarvest as resolveHarvestImpl, resolveIronChain as resolveIronChainImpl, resolvePeachGarden as resolvePeachGardenImpl, resolveSingleDelayedJudgment as resolveSingleDelayedJudgmentImpl, resolveSlash as resolveSlashImpl, resolveSnatch as resolveSnatchImpl, resolveWinner as resolveWinnerImpl, } from "./resolve.js";
 import { createSkillHooks } from "./skill-hooks.js";
 import { canPlaySlashInTurn as canPlaySlashInTurnImpl, canUseAssault as canUseAssaultImpl, canUseFanJian as canUseFanJianImpl, canUseJieYin as canUseJieYinImpl, canUseKuRou as canUseKuRouImpl, canUseLiJian as canUseLiJianImpl, canUseQingNang as canUseQingNangImpl, canUseRenDe as canUseRenDeImpl, canUseZhiBa as canUseZhiBaImpl, canUseZhiHeng as canUseZhiHengImpl, getLordWithZhiBa as getLordWithZhiBaImpl, hasSkill as playerHasSkill, isSkillUsed as playerIsSkillUsed, markSkillUsed as playerMarkSkillUsed, resetTurnSkillState as playerResetTurnSkillState, shouldActivateOptionalEffect as playerShouldActivateOptionalEffect, useSkillAction as useSkillActionImpl, } from "./skills.js";
 import { PlayerRole, SkillName, TurnPhase, } from "./types.js";
@@ -47,6 +47,11 @@ export class SanGuoGame {
     staged = false;
     pendingNextTurn = false;
     pendingTurnEndPlayer = null;
+    /**
+     * 最近一次伤害的来源（目标 playerId → 来源 playerId | null），用于死亡结算时的击杀奖惩。
+     * 迟初始化：热重载会让已存活的实例缺少新字段，因此统一经 damageCreditMap() 访问。
+     */
+    damageCredit;
     constructor(rng = Math.random) {
         this.rng = rng;
         this.players = [];
@@ -1073,6 +1078,108 @@ export class SanGuoGame {
         }
         return { choice: "pass" };
     }
+    /**
+     * "弃置任意张牌"（制衡等）的可选范围：手牌 + 木牛流马内存牌 + 装备区。
+     * 装备区用 `equip:<槽位>` 作为 sourceId，客户端只回传 sourceId，因此不需要协议变更。
+     */
+    buildAnyDiscardSources(player) {
+        const sources = [...this.buildUsableSources(player)];
+        const equipSource = (slot, label, type) => {
+            if (type === null) {
+                return;
+            }
+            sources.push({
+                sourceId: `equip:${slot}`,
+                origin: "equip",
+                card: createCardImpl(this, type, `equip-${slot}-${this.turn}`),
+                label: `${label} ${type}`,
+            });
+        };
+        equipSource("weapon", "武器", player.weapon);
+        equipSource("armor", "防具", player.armor);
+        equipSource("defenseHorse", "+1马", player.defenseHorse);
+        equipSource("attackHorse", "-1马", player.attackHorse);
+        equipSource("treasure", "宝物", player.treasure);
+        return sources;
+    }
+    takeEquipSlot(player, slot) {
+        if (slot === "weapon" && player.weapon !== null) {
+            const type = player.weapon;
+            player.weapon = null;
+            return type;
+        }
+        if (slot === "armor" && player.armor !== null) {
+            const type = player.armor;
+            player.armor = null;
+            return type;
+        }
+        if (slot === "defenseHorse" && player.defenseHorse !== null) {
+            const type = player.defenseHorse;
+            player.defenseHorse = null;
+            return type;
+        }
+        if (slot === "attackHorse" && player.attackHorse !== null) {
+            const type = player.attackHorse;
+            player.attackHorse = null;
+            return type;
+        }
+        if (slot === "treasure" && player.treasure !== null) {
+            const type = player.treasure;
+            player.treasure = null;
+            return type;
+        }
+        return null;
+    }
+    /**
+     * 逐张询问"要弃哪张"，直到玩家放弃或已无牌可弃；返回实际弃置张数。
+     * 复用现有 choose-discard 请求（allowPass=true），CLI / WebUI / Go 客户端均已支持放弃选项。
+     */
+    async requestFlexibleDiscard(player, reason, logs) {
+        const maxCount = this.buildAnyDiscardSources(player).length;
+        let discarded = 0;
+        while (discarded < maxCount) {
+            const sources = this.buildAnyDiscardSources(player);
+            if (sources.length === 0) {
+                break;
+            }
+            const decision = await this.decide({
+                kind: "choose-discard",
+                requestId: this.nextInteractionId(),
+                playerId: player.id,
+                reason: `${reason}（已选 ${discarded} 张，可放弃）`,
+                sources,
+                count: 1,
+                allowPass: true,
+            });
+            if (decision.choice !== "card") {
+                break;
+            }
+            const sourceId = decision.sourceId;
+            if (sourceId.startsWith("equip:")) {
+                const removed = this.takeEquipSlot(player, sourceId.slice("equip:".length));
+                if (removed === null) {
+                    break;
+                }
+                this.discardPile.push(createCardImpl(this, removed, `discard-${this.turn}`));
+                if (removed === CardType.WoodenOx) {
+                    discardWoodenOxStoredCardsImpl(this, player, logs);
+                }
+                logs.push(`${player.name} 弃置装备 ${removed}`);
+                // 弃置装备同样属于"失去装备"，枭姬/白银狮子等技能应正常触发。
+                logs.push(...(await onLoseEquipImpl(this, player, removed)));
+                discarded += 1;
+                continue;
+            }
+            const card = await this.removeUsableCardBySourceId(player, sourceId);
+            if (!card) {
+                break;
+            }
+            this.discardPile.push(card);
+            logs.push(`${player.name} 弃置 ${card.type}`);
+            discarded += 1;
+        }
+        return discarded;
+    }
     buildUsableSources(player) {
         const sources = [];
         for (const card of player.hand) {
@@ -1929,15 +2036,21 @@ export class SanGuoGame {
             return;
         }
         target.hp -= finalDamage;
+        // 记录击杀归属：伤害来源即"凶手"，无来源伤害（闪电、苦肉等 source === target）记 null。
+        this.noteDamageSource(source && source.id !== target.id ? source.id : null, target.id);
         logs.push(`${target.name} 受到 ${finalDamage} 点伤害，当前体力 ${Math.max(target.hp, 0)}`);
-        // 铁索连环传导：处于连环状态的角色受到属性伤害时，其他连环角色受到等量同属性伤害（单波次，不递归）
+        // 铁索连环传导：处于连环状态的角色受到属性伤害时，其他连环角色受到等量同属性伤害（单波次，不递归）。
+        // 属性伤害结算完成后，受到影响的所有角色（含被传导者）立即重置武将牌、脱离连环状态。
         if (!isChainSpread && target.chained) {
             const kind = damageKind ?? attributeDamageKind(damageCard?.type);
             if (kind) {
                 const kindLabel = kind === "fire" ? "火焰" : "雷电";
+                target.chained = false;
+                logs.push(`${target.name} 受到${kindLabel}属性伤害，铁索连环状态重置`);
                 const others = this.players.filter((p) => p.alive && p.chained && p.id !== target.id);
                 for (const other of others) {
-                    logs.push(`铁索连环传导：${other.name} 受到 ${finalDamage} 点${kindLabel}伤害`);
+                    other.chained = false;
+                    logs.push(`铁索连环传导：${other.name} 受到 ${finalDamage} 点${kindLabel}伤害，铁索连环状态重置`);
                     await this.applyDamage(source, other, finalDamage, "铁索连环", logs, damageCard, kind, true);
                 }
             }
@@ -2105,6 +2218,19 @@ export class SanGuoGame {
     }
     resolveDeaths() {
         return resolveDeathsImpl(this);
+    }
+    damageCreditMap() {
+        this.damageCredit ??= new Map();
+        return this.damageCredit;
+    }
+    noteDamageSource(sourceId, targetId) {
+        this.damageCreditMap().set(targetId, sourceId);
+    }
+    takeDamageSource(targetId) {
+        const map = this.damageCreditMap();
+        const sourceId = map.get(targetId) ?? null;
+        map.delete(targetId);
+        return sourceId;
     }
     resolveWinner() {
         return resolveWinnerImpl(this);
