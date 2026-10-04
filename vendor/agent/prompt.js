@@ -138,6 +138,35 @@ export const buildAgentPrompt = (input) => {
     ].join("\n");
     return { systemPrompt, userPrompt };
 };
+/**
+ * Hybrid 回合开始策略规划用 prompt：LLM 只做战略规划，不输出具体动作。
+ * 返回的规划文本会传给 Jev，由 Jev 在局内做快速战术决策时遵循。
+ */
+export const buildPlanPrompt = (input) => {
+    const level = input.reasoningLevel ?? "normal";
+    const previousRoundsText = buildPreviousRoundsText(input.previousRoundContexts);
+    const battlefieldText = input.snapshot.players.map((player) => toPlayerBattleLine(player, input.agent.playerId)).join("\n");
+    const currentRoundStatus = buildCurrentRoundStatus(input.snapshot, input.agent);
+    const systemPrompt = buildSystemPrompt(input.rulesText, input.agent, level, [
+        "你现在是战略规划师，只负责制定本回合的总体战略，不负责具体出牌。",
+        "直接输出战略规划文本（200字以内），不要输出JSON，不要解释格式。",
+    ]);
+    const userPrompt = [
+        `游戏之前轮次上下文（保留最近 ${input.previousRoundContexts.length} 轮）：`,
+        previousRoundsText,
+        input.strategyNote ? buildStrategyNoteBlock(input.strategyNote) : "",
+        "",
+        "游戏本轮状态：",
+        currentRoundStatus,
+        "",
+        "游戏当前战场状态：",
+        battlefieldText,
+        "",
+        "请制定本回合的战略规划，包括：优先攻击/针对的目标、需要保留的关键牌、技能使用思路、需要警惕的威胁。",
+        "直接输出规划文本，200字以内。",
+    ].join("\n");
+    return { systemPrompt, userPrompt };
+};
 const buildRequestDescription = (request) => {
     // 必须同时给出 label 与 sourceId，否则模型无法输出校验通过的来源ID（尤其木牛流马的 choose-discard）
     const sourceText = (sources) => sources.length > 0 ? sources.map((item, index) => `${index + 1}. ${item.label}（来源ID:${item.sourceId}）`).join("\n") : "无";

@@ -1,8 +1,9 @@
 import { callOllamaChatDetailed, listOllamaModels, probeOllamaConnectivity } from "./ollama.js";
-import { buildAgentPrompt, buildInteractionPrompt, buildStrategyPrompt, pickReasoningLevel, REASONING_EFFORT, REASONING_THINKING_MULTIPLIER, } from "./prompt.js";
+import { buildAgentPrompt, buildInteractionPrompt, buildPlanPrompt, buildStrategyPrompt, pickReasoningLevel, REASONING_EFFORT, REASONING_THINKING_MULTIPLIER, } from "./prompt.js";
 import { callQwen35PlusDetailed, probeQwenConnectivity } from "./qwen.js";
 import { writeAiLog } from "../devlog/ailog.js";
 import { parseStrategyReview, StrategyMemory } from "./strategy-memory.js";
+import { JevAdvisor } from "./jev-advisor.js";
 const DEFAULT_MAX_CONTEXT_ROUNDS = 30;
 const DEFAULT_THINKING_MS = 1200;
 /** 复盘时只回看最近 8 个轮次，避免把整段共享历史重复塞入复盘 prompt。 */
@@ -81,13 +82,73 @@ export class GameAiLoop {
     /** 联机断线托管：允许驱动 isAI=false 的人类座位（玩家掉线后由 AI 代打）。 */
     allowNonAiSeats = false;
     /**
-     * Hybrid 快慢结合：出牌前先用快思考层（本地 System-One 或远端 Jev 判断模型）预打分。
-     * 作用有二：1) prompt 里带上候选排名，LLM 只做"选择/否决"，输出更快更稳；
-     * 2) LLM 返回后用 Judge 门控校验，分差过大说明 LLM 在乱来，直接否决用快的。
+     * Hybrid 快慢结合：LLM 做策略规划（回合末复盘积累的 strategy note），
+     * Jev 做局内快决策（出牌 + 响应），规划以 strategic_plan 下发。
+     * 旧版"LLM 出牌 → Jev Judge 门控"仅本地 SystemOneAgent 做 FastAdvisor 时保留。
      */
     fastAdvisor = null;
     /** 上一次 LLM 决策被 Judge 否决的原因（供 turn-decision 日志展示）。 */
     lastJudgeVetoReason = null;
+    /** 是否为新版 hybrid（LLM 策略规划 + Jev 局内快决策）。 */
+    isHybridJev() {
+        return this.fastAdvisor instanceof JevAdvisor;
+    }
+    /** Hybrid 回合开始策略规划缓存：playerId -> { turn, plan }，每回合刷新一次。 */
+    planCache = new Map();
+    /**
+     * Hybrid 回合开始策略规划：LLM 为玩家制定本回合战略（结合策略记忆），缓存到本回合结束。
+     * 规划失败时回退策略记忆，无记忆则返回 undefined（Jev 无规划决策）。
+     */
+    async getHybridPlan(snapshot, agent) {
+        const cached = this.planCache.get(agent.playerId);
+        if (cached && cached.turn === snapshot.turn) {
+            return cached.plan;
+        }
+        const promptPackage = buildPlanPrompt({
+            rulesText: this.rulesText,
+            snapshot,
+            agent: {
+                playerId: agent.playerId,
+                name: agent.name,
+                role: agent.role,
+                general: agent.general,
+            },
+            previousRoundContexts: this.previousRoundContexts,
+            reasoningLevel: "fast",
+            ...strategyNoteFor(agent),
+        });
+        const messages = [
+            { role: "system", content: promptPackage.systemPrompt },
+            { role: "user", content: promptPackage.userPrompt },
+        ];
+        const callResult = await this.requestDecisionWithRetry(messages, "fast");
+        const fallback = this.getStrategyNotePlan(agent) ?? cached?.plan;
+        if (!callResult) {
+            return fallback;
+        }
+        this.writeDecisionLog({
+            callResult,
+            stage: "hybrid-plan",
+            playerId: agent.playerId,
+            playerName: agent.name,
+            prompt: messages,
+            responseText: callResult.content,
+        });
+        const plan = callResult.content.trim().slice(0, 500);
+        if (plan) {
+            this.planCache.set(agent.playerId, { turn: snapshot.turn, plan });
+            return plan;
+        }
+        return fallback;
+    }
+    /**
+     * 策略记忆规划（原有架构）：取子代理的策略记忆（回合末复盘积累），
+     * 在 LLM 回合规划失败时作为兜底。
+     */
+    getStrategyNotePlan(agent) {
+        const note = strategyNoteFor(agent);
+        return "strategyNote" in note ? note.strategyNote : undefined;
+    }
     constructor(rulesText, preferredProvider = "qwen") {
         this.rulesText = rulesText;
         this.started = false;
@@ -443,6 +504,25 @@ export class GameAiLoop {
     buildRepairPrompt(kind) {
         return `你上一条回答无法被程序解析（${kind}）。请基于同一局面重新只输出符合要求的 JSON，禁止解释。`;
     }
+    /**
+     * 新版 hybrid 出牌：LLM 策略规划 + Jev 局内快决策。
+     * Jev 不可用时返回 null，由上层 pickAiTurnDecision 走本地回退。
+     */
+    async decideHybridTurn(snapshot, playerId, agent, actions) {
+        const advisor = this.fastAdvisor;
+        if (!(advisor instanceof JevAdvisor)) {
+            return null;
+        }
+        const plan = await this.getHybridPlan(snapshot, agent);
+        const picked = await advisor.decideTurn(snapshot, playerId, actions, plan);
+        if (!picked) {
+            return null;
+        }
+        const decision = picked.targetId
+            ? { action: picked.action, targetId: picked.targetId, driverLabel: this.getPreferredDriverLabel() }
+            : { action: picked.action, driverLabel: this.getPreferredDriverLabel() };
+        return decision;
+    }
     async decide(game, playerId) {
         if (!this.started) {
             return null;
@@ -459,6 +539,10 @@ export class GameAiLoop {
         const actions = game.getPlayableActions(playerId);
         if (actions.length <= 0) {
             return null;
+        }
+        // 新版 hybrid：LLM 只做总规划，Jev 直接做局内出牌决策。
+        if (this.isHybridJev()) {
+            return await this.decideHybridTurn(snapshot, playerId, agent, actions);
         }
         const level = this.fastAdvisor ? "fast" : this.resolveLevel(snapshot, agent.playerId);
         await this.think(level);
@@ -567,6 +651,16 @@ export class GameAiLoop {
         const current = snapshot.players.find((item) => item.id === playerId);
         if (!current || !current.alive) {
             return null;
+        }
+        // 新版 hybrid：局内响应由 Jev 快速决策（带 LLM 回合规划），不再走 LLM。
+        if (this.isHybridJev()) {
+            const advisor = this.fastAdvisor;
+            if (!(advisor instanceof JevAdvisor)) {
+                return null;
+            }
+            const plan = await this.getHybridPlan(snapshot, agent);
+            const fast = await advisor.decideInteraction(snapshot, playerId, request, plan);
+            return fast?.decision ?? null;
         }
         const level = this.resolveLevel(snapshot, agent.playerId);
         await this.think(level);
