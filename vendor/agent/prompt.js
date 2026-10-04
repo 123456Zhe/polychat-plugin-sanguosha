@@ -100,6 +100,13 @@ export const buildAgentPrompt = (input) => {
     const previousRoundsText = buildPreviousRoundsText(input.previousRoundContexts);
     const battlefieldText = input.snapshot.players.map((player) => toPlayerBattleLine(player, input.agent.playerId)).join("\n");
     const actionText = input.actions.map((action, index) => toActionLine(action, index)).join("\n");
+    const hybridBlock = input.fastShortlist
+        ? [
+            "",
+            `本地快思考已给出候选排名（分越高越推荐）：${input.fastShortlist}`,
+            "你只需判断：是否有明确更优的非常规打法（如身份欺诈、资源置换、连招配合）？有则选它，无则直接选排名第一的候选。",
+        ]
+        : [];
     // 有木牛流马时可动作含存取/移动，提醒模型不要反复置入取出做无意义空转
     const oxGuidance = input.actions.some((action) => action.label.includes(CardType.WoodenOx))
         ? [
@@ -124,6 +131,7 @@ export const buildAgentPrompt = (input) => {
         "",
         "本回合可选动作：",
         actionText,
+        ...hybridBlock,
         ...oxGuidance,
         "",
         '请严格输出JSON，例如 {"actionIndex":1} 或 {"actionIndex":2,"targetId":"human"}。',
