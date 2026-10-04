@@ -6,54 +6,60 @@ export var TurnPhase;
     TurnPhase["Discard"] = "\u5F03\u724C\u9636\u6BB5";
     TurnPhase["End"] = "\u7ED3\u675F\u9636\u6BB5";
 })(TurnPhase || (TurnPhase = {}));
-export var SkillName;
-(function (SkillName) {
-    SkillName["Heroic"] = "\u82F1\u59FF";
-    SkillName["Roar"] = "\u5486\u54EE";
-    SkillName["Assault"] = "\u5F3A\u88AD";
-    SkillName["JuShou"] = "\u636E\u5B88";
-    SkillName["JieWei"] = "\u89E3\u56F4";
-    SkillName["JianXiong"] = "\u5978\u96C4";
-    SkillName["HuJia"] = "\u62A4\u9A7E";
-    SkillName["QingGuo"] = "\u503E\u56FD";
-    SkillName["LuoShen"] = "\u6D1B\u795E";
-    SkillName["GangLie"] = "\u521A\u70C8";
-    SkillName["LuoYi"] = "\u88F8\u8863";
-    SkillName["TuXi"] = "\u7A81\u88AD";
-    SkillName["TianDu"] = "\u5929\u5992";
-    SkillName["YiJi"] = "\u9057\u8BA1";
-    SkillName["FanKui"] = "\u53CD\u9988";
-    SkillName["GuiCai"] = "\u9B3C\u624D";
-    SkillName["RenDe"] = "\u4EC1\u5FB7";
-    SkillName["JiJiang"] = "\u6FC0\u5C06";
-    SkillName["WuSheng"] = "\u6B66\u5723";
-    SkillName["LongDan"] = "\u9F99\u80C6";
-    SkillName["MaShu"] = "\u9A6C\u672F";
-    SkillName["TieQi"] = "\u94C1\u9A91";
-    SkillName["GuanXing"] = "\u89C2\u661F";
-    SkillName["KongCheng"] = "\u7A7A\u57CE";
-    SkillName["JiZhi"] = "\u96C6\u667A";
-    SkillName["QiCai"] = "\u5947\u624D";
-    SkillName["ZhiHeng"] = "\u5236\u8861";
-    SkillName["JiuYuan"] = "\u6551\u63F4";
-    SkillName["FanJian"] = "\u53CD\u95F4";
-    SkillName["KuRou"] = "\u82E6\u8089";
-    SkillName["QianXun"] = "\u8C26\u900A";
-    SkillName["LianYing"] = "\u8FDE\u8425";
-    SkillName["GuoSe"] = "\u56FD\u8272";
-    SkillName["LiuLi"] = "\u6D41\u79BB";
-    SkillName["JieYin"] = "\u7ED3\u59FB";
-    SkillName["XiaoJi"] = "\u67AD\u59EC";
-    SkillName["WuShuang"] = "\u65E0\u53CC";
-    SkillName["LiJian"] = "\u79BB\u95F4";
-    SkillName["BiYue"] = "\u95ED\u6708";
-    SkillName["QingNang"] = "\u9752\u56CA";
-    SkillName["JiJiu"] = "\u6025\u6551";
-    SkillName["JiAng"] = "\u6FC0\u6602";
-    SkillName["HunZi"] = "\u9B42\u59FF";
-    SkillName["YingHun"] = "\u82F1\u9B42";
-    SkillName["ZhiBa"] = "\u5236\u9738";
-})(SkillName || (SkillName = {}));
+export const SkillName = {
+    Heroic: "英姿",
+    Roar: "咆哮",
+    Assault: "强袭",
+    JuShou: "据守",
+    JieWei: "解围",
+    JianXiong: "奸雄",
+    HuJia: "护驾",
+    QingGuo: "倾国",
+    LuoShen: "洛神",
+    GangLie: "刚烈",
+    LuoYi: "裸衣",
+    TuXi: "突袭",
+    TianDu: "天妒",
+    YiJi: "遗计",
+    FanKui: "反馈",
+    GuiCai: "鬼才",
+    RenDe: "仁德",
+    JiJiang: "激将",
+    WuSheng: "武圣",
+    LongDan: "龙胆",
+    MaShu: "马术",
+    TieQi: "铁骑",
+    GuanXing: "观星",
+    KongCheng: "空城",
+    JiZhi: "集智",
+    QiCai: "奇才",
+    ZhiHeng: "制衡",
+    JiuYuan: "救援",
+    FanJian: "反间",
+    KuRou: "苦肉",
+    QianXun: "谦逊",
+    LianYing: "连营",
+    GuoSe: "国色",
+    LiuLi: "流离",
+    JieYin: "结姻",
+    XiaoJi: "枭姬",
+    WuShuang: "无双",
+    LiJian: "离间",
+    BiYue: "闭月",
+    QingNang: "青囊",
+    JiJiu: "急救",
+    JiAng: "激昂",
+    HunZi: "魂姿",
+    YingHun: "英魂",
+    ZhiBa: "制霸",
+};
+/** 势力常量。外部包可用自定义势力字符串。 */
+export const KINGDOM = {
+    Wei: "魏",
+    Shu: "蜀",
+    Wu: "吴",
+    Qun: "群雄",
+};
 export var PlayerRole;
 (function (PlayerRole) {
     PlayerRole["Lord"] = "\u4E3B\u516C";

@@ -4,6 +4,7 @@ import { callQwen35PlusDetailed, probeQwenConnectivity } from "./qwen.js";
 import { writeAiLog } from "../devlog/ailog.js";
 import { parseStrategyReview, StrategyMemory } from "./strategy-memory.js";
 import { JevAdvisor } from "./jev-advisor.js";
+import { buildMatchGeneralsText } from "./match-context.js";
 const DEFAULT_MAX_CONTEXT_ROUNDS = 30;
 const DEFAULT_THINKING_MS = 1200;
 /** 复盘时只回看最近 8 个轮次，避免把整段共享历史重复塞入复盘 prompt。 */
@@ -106,6 +107,7 @@ export class GameAiLoop {
         }
         const promptPackage = buildPlanPrompt({
             rulesText: this.rulesText,
+            matchGeneralsText: buildMatchGeneralsText(snapshot),
             snapshot,
             agent: {
                 playerId: agent.playerId,
@@ -559,6 +561,7 @@ export class GameAiLoop {
             : {};
         const promptPackage = buildAgentPrompt({
             rulesText: this.rulesText,
+            matchGeneralsText: buildMatchGeneralsText(snapshot),
             snapshot,
             agent: {
                 playerId: agent.playerId,
@@ -666,6 +669,7 @@ export class GameAiLoop {
         await this.think(level);
         const promptPackage = buildInteractionPrompt({
             rulesText: this.rulesText,
+            matchGeneralsText: buildMatchGeneralsText(snapshot),
             snapshot,
             agent: {
                 playerId: agent.playerId,
@@ -757,6 +761,7 @@ export class GameAiLoop {
         const previousBlock = agent.memory.composePromptBlock();
         const promptPackage = buildStrategyPrompt({
             rulesText: this.rulesText,
+            matchGeneralsText: buildMatchGeneralsText(state),
             snapshot: state,
             agent: {
                 playerId: agent.playerId,

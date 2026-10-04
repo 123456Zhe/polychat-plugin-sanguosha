@@ -32,7 +32,30 @@ const commonGeneralPool = [
     { kingdom: "群雄", name: "貂蝉", gender: "女", maxHp: 3, skills: [SkillName.LiJian, SkillName.BiYue] },
     { kingdom: "群雄", name: "华佗", gender: "男", maxHp: 3, skills: [SkillName.QingNang, SkillName.JiJiu] },
 ];
-export const GENERAL_LIBRARY = [humanGeneral, ...commonGeneralPool];
+const BUILTIN_GENERALS = [humanGeneral, ...commonGeneralPool];
+/**
+ * 已加载的武将池（内置 + 外部武将包）。
+ * loader（`general-pack.ts`）通过 `setLoadedGenerals` 原地替换数组内容，保持本引用稳定，
+ * 这样 `game.ts` 的 re-export 与既有 `import { GENERAL_LIBRARY }` 都能看到最新池。
+ */
+export const GENERAL_LIBRARY = [...BUILTIN_GENERALS];
+const cloneGeneral = (general) => ({
+    kingdom: general.kingdom,
+    name: general.name,
+    gender: general.gender,
+    maxHp: general.maxHp,
+    skills: [...general.skills],
+});
+export function getBuiltinGenerals() {
+    return BUILTIN_GENERALS.map(cloneGeneral);
+}
+export function setLoadedGenerals(list) {
+    GENERAL_LIBRARY.length = 0;
+    GENERAL_LIBRARY.push(...list);
+}
+export function resetLoadedGenerals() {
+    setLoadedGenerals(BUILTIN_GENERALS);
+}
 export function buildRoleList(playerCount) {
     if (playerCount === 2) {
         return [PlayerRole.Lord, PlayerRole.Rebel];
@@ -77,10 +100,10 @@ export function getRoleDistribution(roles) {
 }
 export function resolveGeneralByName(generalName) {
     const found = GENERAL_LIBRARY.find((item) => item.name === generalName);
-    if (found) {
-        return found;
+    if (!found) {
+        throw new Error(`未知武将：${generalName}（不在已加载的武将池中）`);
     }
-    return humanGeneral;
+    return found;
 }
 export function getAiName(index) {
     const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";

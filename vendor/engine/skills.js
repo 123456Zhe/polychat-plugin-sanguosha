@@ -1,6 +1,8 @@
 import { CardType } from "./cards.js";
 import { resolveGeneralByName } from "./generals.js";
-import { PlayerRole, SkillName, TurnPhase, } from "./types.js";
+import { getPackSkill } from "./skill-module.js";
+import { getSkillRules } from "./skill-rules.js";
+import { KINGDOM, PlayerRole, SkillName, TurnPhase, } from "./types.js";
 export function hasSkill(player, skill) {
     return player.skills.includes(skill);
 }
@@ -58,7 +60,7 @@ export function shouldActivateOptionalEffect(ctx, player, effect) {
     })();
 }
 export function canPlaySlashInTurn(ctx, player) {
-    if (hasSkill(player, SkillName.Roar)) {
+    if (getSkillRules(player).slashLimitExempt) {
         return true;
     }
     if (player.weapon === CardType.Crossbow) {
@@ -87,7 +89,7 @@ export function canUseZhiBa(ctx, player) {
     if (lord.id === player.id) {
         return false;
     }
-    if (resolveGeneralByName(player.general).kingdom !== "吴") {
+    if (resolveGeneralByName(player.general).kingdom !== KINGDOM.Wu) {
         return false;
     }
     if (player.hand.length === 0 || lord.hand.length === 0) {
@@ -437,6 +439,20 @@ export async function useSkillAction(ctx, playerId, action, targetId) {
         player.hp = Math.min(player.maxHp, player.hp + 1);
         markSkillUsed(ctx, player.id, SkillName.JieYin);
         return [`${player.name} 发动${SkillName.JieYin}，弃置 2 张手牌，${player.name}与${target.name}各回复 1 点体力`];
+    }
+    // 外部武将包主动技能（阶段 2）：委托给包的 play 实现，坏技能不炸对局。
+    const packSkill = getPackSkill(action.skill);
+    if (packSkill) {
+        if (!packSkill.play) {
+            return [`${player.name} 的${packSkill.displayName}没有可执行的出牌逻辑`];
+        }
+        try {
+            return await packSkill.play(ctx, player, targetId);
+        }
+        catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            return [`${player.name} 发动${packSkill.displayName}失败：${message}`];
+        }
     }
     return [`${player.name} 发动了未知技能`];
 }
