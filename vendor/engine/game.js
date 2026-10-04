@@ -1,8 +1,8 @@
 import { CardType, CARD_LIBRARY_SUMMARY, createDeck, shuffle } from "./cards.js";
-import { attributeDamageKind, cardNeedsTarget as cardNeedsTargetImpl, describeCard, hasRemovableCard, isDelayedTrickCard as isDelayedTrickCardImpl, isEquipCard as isEquipCardImpl, isNonDelayedTrickCard as isNonDelayedTrickCardImpl, isSlashCard as isSlashCardImpl, slashKindOf, } from "./card-utils.js";
+import { attributeDamageKind, cardNeedsTarget as cardNeedsTargetImpl, describeCard, hasRemovableCard, isDelayedTrickCard as isDelayedTrickCardImpl, isDistanceOneTrickCard, isEquipCard as isEquipCardImpl, isNonDelayedTrickCard as isNonDelayedTrickCardImpl, isSlashCard as isSlashCardImpl, slashKindOf, } from "./card-utils.js";
 import { pickBestAiAction, pickBestTarget, } from "./ai-heuristics.js";
 import { buildRoleList, getAiName, getRoleDistribution, GENERAL_LIBRARY, pickRandomUnusedGeneral, resolveGeneralByName, } from "./generals.js";
-import { canReachForSlash as canReachForSlashImpl, createCard as createCardImpl, discardSelfCards as discardSelfCardsImpl, discardWoodenOxStoredCards as discardWoodenOxStoredCardsImpl, expandSlashTargets as expandSlashTargetsImpl, onLoseEquip as onLoseEquipImpl, removeRandomCardFromPlayer as removeRandomCardFromPlayerImpl, resolveArrowRain as resolveArrowRainImpl, resolveBarbarian as resolveBarbarianImpl, resolveCollateral as resolveCollateralImpl, resolveDeaths as resolveDeathsImpl, resolveDelayedJudgments as resolveDelayedJudgmentsImpl, resolveDelayedTrick as resolveDelayedTrickImpl, resolveDismantle as resolveDismantleImpl, resolveDuel as resolveDuelImpl, resolveEquip as resolveEquipImpl, resolveFireAttack as resolveFireAttackImpl, resolveHarvest as resolveHarvestImpl, resolveIronChain as resolveIronChainImpl, resolvePeachGarden as resolvePeachGardenImpl, resolveSingleDelayedJudgment as resolveSingleDelayedJudgmentImpl, resolveSlash as resolveSlashImpl, resolveSnatch as resolveSnatchImpl, resolveWinner as resolveWinnerImpl, } from "./resolve.js";
+import { canReachForDistanceOneTrick as canReachForDistanceOneTrickImpl, canReachForSlash as canReachForSlashImpl, createCard as createCardImpl, discardSelfCards as discardSelfCardsImpl, discardWoodenOxStoredCards as discardWoodenOxStoredCardsImpl, expandSlashTargets as expandSlashTargetsImpl, onLoseEquip as onLoseEquipImpl, removeRandomCardFromPlayer as removeRandomCardFromPlayerImpl, resolveArrowRain as resolveArrowRainImpl, resolveBarbarian as resolveBarbarianImpl, resolveCollateral as resolveCollateralImpl, resolveDeaths as resolveDeathsImpl, resolveDelayedJudgments as resolveDelayedJudgmentsImpl, resolveDelayedTrick as resolveDelayedTrickImpl, resolveDismantle as resolveDismantleImpl, resolveDuel as resolveDuelImpl, resolveEquip as resolveEquipImpl, resolveFireAttack as resolveFireAttackImpl, resolveHarvest as resolveHarvestImpl, resolveIronChain as resolveIronChainImpl, resolvePeachGarden as resolvePeachGardenImpl, resolveSingleDelayedJudgment as resolveSingleDelayedJudgmentImpl, resolveSlash as resolveSlashImpl, resolveSnatch as resolveSnatchImpl, resolveWinner as resolveWinnerImpl, } from "./resolve.js";
 import { createSkillHooks } from "./skill-hooks.js";
 import { canPlaySlashInTurn as canPlaySlashInTurnImpl, canUseAssault as canUseAssaultImpl, canUseFanJian as canUseFanJianImpl, canUseJieYin as canUseJieYinImpl, canUseKuRou as canUseKuRouImpl, canUseLiJian as canUseLiJianImpl, canUseQingNang as canUseQingNangImpl, canUseRenDe as canUseRenDeImpl, canUseZhiBa as canUseZhiBaImpl, canUseZhiHeng as canUseZhiHengImpl, getLordWithZhiBa as getLordWithZhiBaImpl, hasSkill as playerHasSkill, isSkillUsed as playerIsSkillUsed, markSkillUsed as playerMarkSkillUsed, resetTurnSkillState as playerResetTurnSkillState, shouldActivateOptionalEffect as playerShouldActivateOptionalEffect, useSkillAction as useSkillActionImpl, } from "./skills.js";
 import { PlayerRole, SkillName, TurnPhase, } from "./types.js";
@@ -871,6 +871,9 @@ export class SanGuoGame {
             }
             if (this.isSlashCard(card.type) && !this.canReachForSlash(player, target)) {
                 return ["目标超出攻击范围"];
+            }
+            if (isDistanceOneTrickCard(card.type) && !this.canReachForDistanceOneTrick(player, target)) {
+                return [`目标超出距离，${card.type}只能对距离 1 以内的角色使用`];
             }
         }
         const usedCard = await this.removeHandCardAt(player, action.cardIndex);
@@ -1745,9 +1748,14 @@ export class SanGuoGame {
             return targets.filter((id) => hasRemovableCard(this.mustGetPlayer(id)));
         }
         if (cardType === CardType.Snatch) {
+            const user = this.mustGetPlayer(playerId);
             return targets.filter((id) => {
                 const holder = this.mustGetPlayer(id);
                 if (this.hasSkill(holder, SkillName.QianXun)) {
+                    return false;
+                }
+                // 顺手牵羊只能对距离 1 以内的角色使用（奇才无视该限制）
+                if (!this.canReachForDistanceOneTrick(user, holder)) {
                     return false;
                 }
                 return hasRemovableCard(holder);
@@ -1764,9 +1772,14 @@ export class SanGuoGame {
             });
         }
         if (cardType === CardType.Indulgence || cardType === CardType.SuppliesCut) {
+            const user = this.mustGetPlayer(playerId);
             return targets.filter((id) => {
                 const holder = this.mustGetPlayer(id);
                 if (cardType === CardType.Indulgence && this.hasSkill(holder, SkillName.QianXun)) {
+                    return false;
+                }
+                // 兵粮寸断只能对距离 1 以内的角色使用（奇才无视该限制）；乐不思蜀无距离限制
+                if (cardType === CardType.SuppliesCut && !this.canReachForDistanceOneTrick(user, holder)) {
                     return false;
                 }
                 return !holder.delayedTricks.some((t) => t.cardType === cardType);
@@ -2158,6 +2171,9 @@ export class SanGuoGame {
     }
     canReachForSlash(attacker, target) {
         return canReachForSlashImpl(this, attacker, target);
+    }
+    canReachForDistanceOneTrick(user, target) {
+        return canReachForDistanceOneTrickImpl(this, user, target);
     }
     createCard(type, seed) {
         return createCardImpl(this, type, seed);
