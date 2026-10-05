@@ -706,6 +706,10 @@ export class GameServer {
         if (this.aiLoop) {
             return (await this.aiLoop.decideInteraction(this.game, playerId, request)) ?? null;
         }
+        // simple 驱动（aiLoop 为 null）：走本地策略引擎，不再掉进引擎无脑 autoDecision。
+        if (this.localAiEngine) {
+            return this.localAiEngine.decideInteraction(this.game.getSnapshot(), playerId, request)?.decision ?? null;
+        }
         return null;
     }
     /** 断线托管：把人类座位的交互决策改路由给 AI，并为 LLM 驱动注册子代理。 */
