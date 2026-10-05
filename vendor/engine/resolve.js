@@ -15,6 +15,17 @@ export function resolveSlash(ctx, attacker, target, fromSerpent = false, kind = 
         if (fromSerpent) {
             logs.push("本次杀来自丈八蛇矛转化");
         }
+        // 拦截点 slash_targeted：目标已确定、尚未响应时发出；钩子置 canceled 即取消本次杀。
+        const targeted = {
+            source: attacker,
+            target,
+            ...(damageCard ? { card: damageCard } : {}),
+        };
+        await ctx.emitSkillTrigger("slash_targeted", targeted, logs);
+        if (targeted.canceled) {
+            logs.push(`${target.name} 令本次杀无效`);
+            return logs;
+        }
         // 流离：成为杀目标时，可弃1张牌将此杀转移给攻击范围内的其他角色
         if (ctx.hasSkill(target, SkillName.LiuLi)) {
             const redirectCandidates = ctx.players.filter((player) => player.alive && player.id !== target.id && player.id !== attacker.id && canReachForSlash(ctx, target, player));
@@ -703,6 +714,14 @@ export function resolveDeaths(ctx) {
                             recovered += peachSaveBonus;
                             logs.push(`${player.name} 的${SkillName.JiuYuan}生效，额外回复 ${peachSaveBonus} 点体力`);
                         }
+                        // 拦截点 peach_save：每消耗一张救援桃发出；钩子可累加 peachSaveBonus 追加回复。
+                        const rescuePayload = { actor: player, source: rescuer, reason: "濒死救援" };
+                        await ctx.emitSkillTrigger("peach_save", rescuePayload, logs);
+                        const extra = Math.max(0, rescuePayload.peachSaveBonus ?? 0);
+                        if (extra > 0) {
+                            recovered += extra;
+                            logs.push(`${player.name} 的救援技能生效，额外回复 ${extra} 点体力`);
+                        }
                         player.hp = Math.min(player.maxHp, player.hp + recovered);
                         logs.push(`${rescuer.name} 对${player.name}使用${CardType.Peach}，其体力恢复到 ${player.hp}`);
                     }
@@ -1041,6 +1060,8 @@ export function consumeSlashResponse(ctx, player, trigger, logs) {
 export function onLoseEquip(ctx, player, equip) {
     return (async () => {
         const logs = [];
+        // 拦截点 equip_lost：装备离开装备区（被弃置/获得/替换）时通知。
+        await ctx.emitSkillTrigger("equip_lost", { actor: player, equip }, logs);
         if (ctx.hasSkill(player, SkillName.XiaoJi) && await ctx.shouldActivateOptionalEffect(player, SkillName.XiaoJi)) {
             const drawn = ctx.drawCards(player.id, 2);
             if (drawn > 0) {

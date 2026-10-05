@@ -60,6 +60,26 @@ export const KINGDOM = {
     Wu: "吴",
     Qun: "群雄",
 };
+/**
+ * 技能触发点 / 拦截点（Phase 0 的 4 个基础触发点 + Phase 6 新增的拦截点）。
+ *
+ * 前 4 个是"事件通知"（钩子可改写 payload 里的数值，如 `drawCount`）；
+ * 后 7 个是 Phase 6 的拦截点（钩子可改写/否决引擎即将执行的行为，见各字段注释）。
+ * 单一真相：`SkillTrigger` 由本数组派生，loader 校验与钩子分发都读它，避免多处清单漂移。
+ */
+export const SKILL_TRIGGERS = [
+    "turn_start",
+    "before_draw",
+    "before_damage",
+    "after_damage",
+    "judgment",
+    "slash_targeted",
+    "hand_card_lost",
+    "equip_lost",
+    "card_used",
+    "peach_save",
+    "discard_phase_start",
+];
 export var PlayerRole;
 (function (PlayerRole) {
     PlayerRole["Lord"] = "\u4E3B\u516C";

@@ -1,8 +1,7 @@
 import { countRemovableSelfCards } from "./card-utils.js";
 import { getPackHooksFor } from "./skill-module.js";
 import { resolveSkillDescriptor } from "./skill-registry.js";
-import { SkillName } from "./types.js";
-const PACK_TRIGGERS = ["turn_start", "before_draw", "before_damage", "after_damage"];
+import { SKILL_TRIGGERS, SkillName } from "./types.js";
 /** 魂姿觉醒：体力降到 1 时（含回合开始）触发，已有英魂则跳过（防重复）。 */
 const tryAwakenHunZi = (ctx, actor, logs) => {
     if (!actor || !ctx.hasSkill(actor, SkillName.HunZi)) {
@@ -249,10 +248,18 @@ export function createSkillHooks(ctx) {
                 tryAwakenHunZi(ctx, payload.target, logs);
             },
         ],
+        // Phase 6 拦截点：目前没有内置技能占用，全部留给外部武将包（在内置钩子之后追加）。
+        judgment: [],
+        slash_targeted: [],
+        hand_card_lost: [],
+        equip_lost: [],
+        card_used: [],
+        peach_save: [],
+        discard_phase_start: [],
     };
     // 外部武将包技能：每个触发点在内置钩子之后追加。
     const packCtx = ctx;
-    for (const trigger of PACK_TRIGGERS) {
+    for (const trigger of SKILL_TRIGGERS) {
         for (const entry of getPackHooksFor(trigger)) {
             hooks[trigger].push((payload, logs) => entry.onTrigger?.[trigger]?.(packCtx, payload, logs));
         }

@@ -5,7 +5,8 @@ import { buildRoleList, getAiName, getRoleDistribution, GENERAL_LIBRARY, pickRan
 import { canReachForDistanceOneTrick as canReachForDistanceOneTrickImpl, canReachForSlash as canReachForSlashImpl, createCard as createCardImpl, discardSelfCards as discardSelfCardsImpl, discardWoodenOxStoredCards as discardWoodenOxStoredCardsImpl, expandSlashTargets as expandSlashTargetsImpl, onLoseEquip as onLoseEquipImpl, removeRandomCardFromPlayer as removeRandomCardFromPlayerImpl, resolveArrowRain as resolveArrowRainImpl, resolveBarbarian as resolveBarbarianImpl, resolveCollateral as resolveCollateralImpl, resolveDeaths as resolveDeathsImpl, resolveDelayedJudgments as resolveDelayedJudgmentsImpl, resolveDelayedTrick as resolveDelayedTrickImpl, resolveDismantle as resolveDismantleImpl, resolveDuel as resolveDuelImpl, resolveEquip as resolveEquipImpl, resolveFireAttack as resolveFireAttackImpl, resolveHarvest as resolveHarvestImpl, resolveIronChain as resolveIronChainImpl, resolvePeachGarden as resolvePeachGardenImpl, resolveSingleDelayedJudgment as resolveSingleDelayedJudgmentImpl, resolveSlash as resolveSlashImpl, resolveSnatch as resolveSnatchImpl, resolveWinner as resolveWinnerImpl, } from "./resolve.js";
 import { createSkillHooks } from "./skill-hooks.js";
 import { getPackSkills } from "./skill-module.js";
-import { getSkillRules, isImmuneTo } from "./skill-rules.js";
+import { resolveSkillDescriptor } from "./skill-registry.js";
+import { findSkillWithBooleanRule, getSkillRules, isImmuneTo } from "./skill-rules.js";
 import { canPlaySlashInTurn as canPlaySlashInTurnImpl, canUseAssault as canUseAssaultImpl, canUseFanJian as canUseFanJianImpl, canUseJieYin as canUseJieYinImpl, canUseKuRou as canUseKuRouImpl, canUseLiJian as canUseLiJianImpl, canUseQingNang as canUseQingNangImpl, canUseRenDe as canUseRenDeImpl, canUseZhiBa as canUseZhiBaImpl, canUseZhiHeng as canUseZhiHengImpl, getLordWithZhiBa as getLordWithZhiBaImpl, hasSkill as playerHasSkill, isSkillUsed as playerIsSkillUsed, markSkillUsed as playerMarkSkillUsed, resetTurnSkillState as playerResetTurnSkillState, shouldActivateOptionalEffect as playerShouldActivateOptionalEffect, useSkillAction as useSkillActionImpl, } from "./skills.js";
 import { PlayerRole, SkillName, TurnPhase, } from "./types.js";
 export { TurnPhase, SkillName, PlayerRole } from "./types.js";
@@ -27,6 +28,8 @@ export class SanGuoGame {
     turn;
     phase;
     slashUsedThisTurn;
+    /** 本回合是否"打出"过杀（响应决斗/南蛮等），与 `slashUsedThisTurn`（使用）分开计数。 */
+    slashPlayedThisTurn;
     /** 本回合已获得"下一张杀伤害+1"的玩家（酒方法Ⅰ） */
     wineBuffPlayerIds;
     /** 本回合已使用过酒（方法Ⅰ）的玩家，每回合限一次 */
@@ -63,6 +66,7 @@ export class SanGuoGame {
         this.turn = 1;
         this.phase = TurnPhase.Draw;
         this.slashUsedThisTurn = false;
+        this.slashPlayedThisTurn = false;
         this.wineBuffPlayerIds = new Set();
         this.wineUsedPlayerIds = new Set();
         this.winner = null;
@@ -113,6 +117,7 @@ export class SanGuoGame {
         this.phase = TurnPhase.Draw;
         this.winner = null;
         this.slashUsedThisTurn = false;
+        this.slashPlayedThisTurn = false;
         this.wineBuffPlayerIds = new Set();
         this.wineUsedPlayerIds = new Set();
         this.skillUsedThisTurn = new Map();
@@ -161,6 +166,7 @@ export class SanGuoGame {
         this.phase = TurnPhase.Draw;
         this.winner = null;
         this.slashUsedThisTurn = false;
+        this.slashPlayedThisTurn = false;
         this.wineBuffPlayerIds = new Set();
         this.wineUsedPlayerIds = new Set();
         this.skillUsedThisTurn = new Map();
@@ -911,6 +917,8 @@ export class SanGuoGame {
     async resolveUsedCard(player, usedCard, targetId, fromTreasure, selectedCardId) {
         this.discardPile.push(usedCard);
         const logs = [];
+        // 拦截点 card_used：使用一张牌时（结算前）通知，reason="使用"。
+        await this.emitSkillTrigger("card_used", { actor: player, card: usedCard, reason: "使用" }, logs);
         if (fromTreasure) {
             logs.push(`${player.name} 从${CardType.WoodenOx}下使用了 ${usedCard.type}`);
         }
@@ -1383,6 +1391,12 @@ export class SanGuoGame {
             return false;
         }
         this.discardPile.push(removed);
+        // 本回合"打出"过杀（与出牌阶段"使用"杀分开计数，供克己等技能判定）。
+        if (kind === "slash") {
+            this.slashPlayedThisTurn = true;
+        }
+        // 拦截点 card_used：打出一张响应牌（reason="打出"）。
+        await this.emitSkillTrigger("card_used", { actor: player, card: removed, reason: "打出" }, logs);
         if (wineAsPeach) {
             logs.push(`${player.name} 使用酒自救（当${CardType.Peach}）`);
         }
@@ -1645,6 +1659,7 @@ export class SanGuoGame {
         }
         this.phase = TurnPhase.Judgment;
         this.slashUsedThisTurn = false;
+        this.slashPlayedThisTurn = false;
         this.wineBuffPlayerIds = new Set();
         this.wineUsedPlayerIds = new Set();
         const player = this.currentPlayer;
@@ -1708,16 +1723,18 @@ export class SanGuoGame {
         this.phase = TurnPhase.Discard;
         const logs = [];
         logs.push(`进入${TurnPhase.Discard}`);
-        if (!player.isAI && player.hand.length > player.hp) {
-            logs.push(`${player.name} 需要弃置 ${player.hand.length - player.hp} 张手牌`);
-            return logs;
-        }
-        while (player.hand.length > player.hp) {
-            const index = this.randomIndex(player.hand.length);
-            const removed = await this.removeHandCardAt(player, index);
-            if (removed) {
-                this.discardPile.push(removed);
-                logs.push(`${player.name} 弃置了 ${removed.type}`);
+        if (!await this.shouldSkipDiscardPhase(player, logs)) {
+            if (!player.isAI && player.hand.length > player.hp) {
+                logs.push(`${player.name} 需要弃置 ${player.hand.length - player.hp} 张手牌`);
+                return logs;
+            }
+            while (player.hand.length > player.hp) {
+                const index = this.randomIndex(player.hand.length);
+                const removed = await this.removeHandCardAt(player, index);
+                if (removed) {
+                    this.discardPile.push(removed);
+                    logs.push(`${player.name} 弃置了 ${removed.type}`);
+                }
             }
         }
         if (this.staged) {
@@ -1727,6 +1744,31 @@ export class SanGuoGame {
             logs.push(...(await this.finishTurn(player)));
         }
         return logs;
+    }
+    /**
+     * 弃牌阶段入口的拦截点（Phase 6）：让外部武将包与声明式规则有机会跳过整个弃牌阶段。
+     *
+     * 两条路径，任一命中即跳过：
+     * 1. `discard_phase_start` 钩子把 `payload.skipDiscardPhase` 置 true（钩子自行处理"是否发动"询问）；
+     * 2. 声明式规则 `rules.skipDiscardPhaseIfNoSlash`：本回合未使用/打出过杀时，询问玩家是否发动（克己）。
+     */
+    async shouldSkipDiscardPhase(player, logs) {
+        const payload = { actor: player };
+        await this.emitSkillTrigger("discard_phase_start", payload, logs);
+        if (payload.skipDiscardPhase) {
+            logs.push(`${player.name} 跳过弃牌阶段`);
+            return true;
+        }
+        const skillId = findSkillWithBooleanRule(player, "skipDiscardPhaseIfNoSlash");
+        if (!skillId || this.slashUsedThisTurn || this.slashPlayedThisTurn) {
+            return false;
+        }
+        if (!await this.shouldActivateOptionalEffect(player, skillId)) {
+            return false;
+        }
+        const displayName = resolveSkillDescriptor(skillId).displayName ?? skillId;
+        logs.push(`${player.name} 发动${displayName}，跳过弃牌阶段`);
+        return true;
     }
     async finishTurn(player) {
         const logs = [];
@@ -1854,6 +1896,16 @@ export class SanGuoGame {
         this.discardPile.push(card);
         const suitNames = { heart: "红桃", diamond: "方片", club: "梅花", spade: "黑桃", none: "无花色" };
         logs.push(`${reason}判定牌：${suitNames[card.suit]}${card.rank} ${card.type}`);
+        // 拦截点 judgment：外部包可替换判定牌实现"改判"。钩子自己负责把替换牌从原区域移除，
+        // 引擎负责把替换牌置入弃牌堆并接管后续（与内置鬼才的处理方式一致）。
+        const judgmentPayload = { ...(owner ? { actor: owner } : {}), reason, card, judgmentCard: card };
+        await this.emitSkillTrigger("judgment", judgmentPayload, logs);
+        if (judgmentPayload.judgmentCard && judgmentPayload.judgmentCard.id !== card.id) {
+            const replacement = judgmentPayload.judgmentCard;
+            this.discardPile.push(replacement);
+            logs.push(`${reason}判定牌被替换：${describeCard(card)} → ${describeCard(replacement)}`);
+            card = replacement;
+        }
         const guiCaiPlayer = this.players.find((item) => item.alive && this.hasSkill(item, SkillName.GuiCai));
         if (guiCaiPlayer) {
             const sources = this.buildUsableSources(guiCaiPlayer);
@@ -1996,6 +2048,9 @@ export class SanGuoGame {
     async removeHandCardAt(player, index, logs) {
         const removed = player.hand.splice(index, 1)[0];
         if (removed) {
+            // 拦截点 hand_card_lost：只通知，不改变移除结果。
+            // 注意：调用方未传 logs 时，钩子产生的日志会被丢弃（不进入对局日志）。
+            await this.emitSkillTrigger("hand_card_lost", { actor: player, card: removed }, logs ?? []);
             await this.checkLianYing(player, logs);
         }
         return removed;
