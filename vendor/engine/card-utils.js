@@ -125,6 +125,49 @@ export function describeCard(card) {
     return `${card.type}[${suit}${rank}]`;
 }
 /**
+ * 由牌类推出杀的属性（当牌转换的响应时机 `asResponse` 校验用：只看目标牌类）。
+ * 注意：出牌结算一律用 `slashKindOf(attacker, cardType)`，它还会看攻击者的武器
+ * （朱雀羽扇）；这里故意不看武器，不要在结算路径误用。
+ */
+export function slashKindFromCardType(cardType) {
+    if (cardType === CardType.FireSlash) {
+        return "fire";
+    }
+    if (cardType === CardType.ThunderSlash) {
+        return "thunder";
+    }
+    return "normal";
+}
+/** 响应时机 → 需要打出的牌类（当牌转换的 `asResponse` 校验与匹配用）。 */
+export function responseKindToCardType(kind) {
+    switch (kind) {
+        case "dodge":
+            return CardType.Dodge;
+        case "slash":
+            return CardType.Slash;
+        case "negate":
+            return CardType.Negate;
+        case "peach":
+            return CardType.Peach;
+    }
+}
+/**
+ * 当牌转换的源牌筛选（Phase 7）：`from` 里给出的条件之间是 AND，未给的条件不限制。
+ * 纯函数，游戏逻辑与校验器共用。
+ */
+export function matchesConversionFilter(card, filter) {
+    if (filter.suit && !filter.suit.includes(card.suit)) {
+        return false;
+    }
+    if (filter.color && !filter.color.includes(card.color)) {
+        return false;
+    }
+    if (filter.type && !filter.type.includes(card.type)) {
+        return false;
+    }
+    return true;
+}
+/**
  * 判定一次杀攻击的属性。
  * 朱雀羽扇：装备者的普通杀视为火杀；雷杀不受影响。
  */

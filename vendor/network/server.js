@@ -10,6 +10,7 @@ import { buildBattlefieldLines, buildRoundContexts, trackRoundBattlefield } from
 import { stripGeneralsSections } from "../agent/match-context.js";
 import { computeAiTurnActionLimit, pickAiTurnDecision } from "../agent/turn-decision.js";
 import { SanGuoGame } from "../engine/game.js";
+import { GENERAL_LIBRARY } from "../engine/generals.js";
 import { hotReloadEngine } from "../engine/hot-reload.js";
 import { createClientSnapshot, encodeMessage, NETWORK_PROTOCOL_VERSION } from "./protocol.js";
 import { JsonLineParser, LineTooLongError } from "./line-parser.js";
@@ -43,6 +44,7 @@ export class GameServer {
     liveConnections; // 当前 TCP 连接（连接数上限用），迟初始化
     seatTokens; // playerId -> 座位令牌（join 时签发）
     seatSources; // playerId -> 加入时的来源指纹（令牌缺失时的兜底校验）
+    seatGenerals; // playerId -> join 时用调试参数指定的武将（重开一局仍沿用）
     server = null;
     restarting = false;
     closing = false;
@@ -56,6 +58,10 @@ export class GameServer {
     }
     get maxConnections() {
         return this.options.maxConnections ?? 32;
+    }
+    /** 房主开关（`--allow-general-pick`）：关闭时玩家的 `--general` 调试参数整体不可用。 */
+    get allowGeneralPick() {
+        return this.options.allowGeneralPick === true;
     }
     get interactionTimeoutMs() {
         return this.options.interactionTimeoutMs ?? 120_000;
@@ -75,6 +81,11 @@ export class GameServer {
     seatSourcesMap() {
         this.seatSources ??= new Map();
         return this.seatSources;
+    }
+    /** 座位指定的武将（调试参数 `--general=`）；迟初始化以兼容热重载后缺少新字段的存活实例。 */
+    seatGeneralsMap() {
+        this.seatGenerals ??= new Map();
+        return this.seatGenerals;
     }
     /**
      * 座位接管校验（重连 / 同名顶座）——playerId 与玩家名在对局中都是公开信息，
@@ -187,6 +198,13 @@ export class GameServer {
             isAI: true,
         }));
     }
+    /** 真人座位配置：带上 join 时用调试参数 `--general=` 指定的武将（重开一局仍沿用）。 */
+    buildHumanConfigs(peers = Array.from(this.peers.values())) {
+        return peers.map((peer) => {
+            const general = this.seatGeneralsMap().get(peer.id);
+            return { id: peer.id, name: peer.name, ...(general ? { general } : {}) };
+        });
+    }
     get humanSlots() {
         return Math.max(1, this.options.playerCount - (this.options.aiCount ?? 0));
     }
@@ -287,7 +305,7 @@ export class GameServer {
         }
         const aiConfigs = this.buildAiConfigs();
         this.aiPlayerIds = aiConfigs.map((config) => config.id);
-        await this.game.initNetworkGame([...onlinePeers.map(({ id, name }) => ({ id, name })), ...aiConfigs], this.options.openingHandCount, false);
+        await this.game.initNetworkGame([...this.buildHumanConfigs(onlinePeers), ...aiConfigs], this.options.openingHandCount, false);
         for (const peer of onlinePeers) {
             this.game.setDecisionHandler(peer.id, (request) => this.requestPeerDecision(peer.id, request));
         }
@@ -417,7 +435,7 @@ export class GameServer {
             return;
         }
         if (message.type === "join") {
-            this.handleJoin(socket, parser, message.name, message.version);
+            this.handleJoin(socket, parser, message.name, message.version, message.general);
             return;
         }
         const peer = this.peers.get(socket);
@@ -454,7 +472,7 @@ export class GameServer {
         }
         return { fingerprint: fingerprintOf(socket.remoteAddress ?? "unknown", ""), verified: false };
     }
-    handleJoin(socket, parser, name, version) {
+    handleJoin(socket, parser, name, version, general) {
         const trimmed = name.trim().slice(0, 20);
         if (!trimmed) {
             this.send(socket, { type: "error", message: "玩家名称不能为空" });
@@ -485,6 +503,11 @@ export class GameServer {
             }
         }
         if (this.started) {
+            // 已开局：--general 是"新座位指定武将"用的调试参数，重连只能沿用本座位当前武将，
+            // 明确记一条日志而不是静默丢弃参数。
+            if (general !== undefined && general.trim() !== "") {
+                this.log(`${trimmed} 在已开局的对局中重连，--general 调试参数被忽略（沿用本座位当前武将）`);
+            }
             // Normal reconnection: player is in disconnected map (clean disconnect)
             const entry = Array.from(this.disconnected.entries()).find(([, playerName]) => playerName === trimmed);
             if (entry) {
@@ -522,6 +545,38 @@ export class GameServer {
             this.send(socket, { type: "error", message: "房间已开始" });
             return;
         }
+        // 调试参数 --general=<武将名>：只对新加入的座位生效，而且**房主必须先开启**
+        // （--allow-general-pick，默认关闭）。名称必须命中已加载的武将池
+        // （host 默认 builtin，外部包需 --generals-pool=all），且同一局内不能被两个座位选走
+        // ——后者会让建局直接失败，因此在这里先到先得地拒绝，而不是等到开局才报错。
+        const requestedGeneral = general?.trim() ? general.trim() : undefined;
+        if (requestedGeneral !== undefined) {
+            if (!this.allowGeneralPick) {
+                this.send(socket, {
+                    type: "error",
+                    message: "主机未开启武将自选（房主需以 --allow-general-pick 启动），请去掉 --general 后重新加入",
+                });
+                socket.end();
+                return;
+            }
+            if (!GENERAL_LIBRARY.some((item) => item.name === requestedGeneral)) {
+                this.send(socket, {
+                    type: "error",
+                    message: `武将「${requestedGeneral}」不在已加载的武将池中（主机可用 --generals-pool=all 加载外部武将包）`,
+                });
+                socket.end();
+                return;
+            }
+            const claimed = Array.from(this.peers.values()).find((peer) => this.seatGeneralsMap().get(peer.id) === requestedGeneral);
+            if (claimed) {
+                this.send(socket, {
+                    type: "error",
+                    message: `武将「${requestedGeneral}」已被玩家「${claimed.name}」选走，请换一个（--general=<武将名>）`,
+                });
+                socket.end();
+                return;
+            }
+        }
         if (this.peers.size >= this.humanSlots) {
             this.send(socket, { type: "error", message: "房间已满" });
             return;
@@ -549,6 +604,11 @@ export class GameServer {
         const joinSource = this.getSourceInfo(socket);
         if (joinSource.verified) {
             this.seatSourcesMap().set(peer.id, joinSource.fingerprint);
+        }
+        if (requestedGeneral !== undefined) {
+            this.seatGeneralsMap().set(peer.id, requestedGeneral);
+            this.log(`${trimmed} 使用调试参数指定武将：${requestedGeneral}`);
+            console.log(`${trimmed} 使用调试参数指定武将：${requestedGeneral}`);
         }
         this.send(socket, { type: "welcome", playerId: peer.id, roomSize: this.options.playerCount, seatToken });
         this.broadcastLobby();
@@ -614,7 +674,7 @@ export class GameServer {
             if (snapshot.players.length === 0) {
                 const aiConfigs = this.buildAiConfigs();
                 this.aiPlayerIds = aiConfigs.map((config) => config.id);
-                this.log(...(await this.game.initNetworkGame([...Array.from(this.peers.values()).map(({ id, name }) => ({ id, name })), ...aiConfigs], this.options.openingHandCount, false)));
+                this.log(...(await this.game.initNetworkGame([...this.buildHumanConfigs(), ...aiConfigs], this.options.openingHandCount, false)));
             }
             for (const peer of this.peers.values()) {
                 this.game.setDecisionHandler(peer.id, (request) => this.requestPeerDecision(peer.id, request));
@@ -1129,6 +1189,9 @@ export class GameServer {
             return;
         this.peers.delete(socket);
         if (!this.started) {
+            // 未开局就离开：座位并不存在，连带清掉调试参数指定的武将——否则该 id 之后被复用时
+            // 会把上一个人点的将"继承"给新座位（并且这个武将名也该立刻释放给别人选）。
+            this.seatGeneralsMap().delete(peer.id);
             this.broadcastLobby();
             return;
         }

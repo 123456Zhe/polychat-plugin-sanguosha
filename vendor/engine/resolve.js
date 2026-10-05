@@ -1,7 +1,7 @@
 import { CardType } from "./cards.js";
 import { countRemovableSelfCards, hasRemovableCard, isArmorCard, isAttackHorseCard, isDefenseHorseCard, isSlashCard, isWeaponCard, slashKindOf, usableCardCount, } from "./card-utils.js";
 import { resolveGeneralByName } from "./generals.js";
-import { getSkillRules, isImmuneTo, sumActivatedRules } from "./skill-rules.js";
+import { getSkillRules, immunitySourceName, isImmuneTo, sumActivatedRules } from "./skill-rules.js";
 import { KINGDOM, PlayerRole, SkillName, } from "./types.js";
 export function resolveSlash(ctx, attacker, target, fromSerpent = false, kind = "normal", damageCard) {
     return (async () => {
@@ -228,7 +228,8 @@ export function resolveSnatch(ctx, user, target, selectedCardId) {
     return (async () => {
         const logs = [`${user.name} 对 ${target.name} 使用顺手牵羊`];
         if (isImmuneTo(target, "snatch")) {
-            logs.push(`${target.name} 的${SkillName.QianXun}生效，不能成为顺手牵羊的目标`);
+            const sourceName = immunitySourceName(target, "snatch") ?? SkillName.QianXun;
+            logs.push(`${target.name} 的${sourceName}生效，不能成为顺手牵羊的目标`);
             return logs;
         }
         if (!canReachForDistanceOneTrick(ctx, user, target)) {
@@ -256,7 +257,8 @@ export function resolveSnatch(ctx, user, target, selectedCardId) {
 export function resolveDuel(ctx, user, target, duelCard) {
     return (async () => {
         const logs = [`${user.name} 对 ${target.name} 发起决斗`];
-        await triggerJiAng(ctx, user, target, duelCard?.color === "red", logs);
+        // 激昂：使用【决斗】即触发，不分颜色（与"红色【杀】"不同）；视为使用的决斗（无实体牌）同样触发。
+        await triggerJiAng(ctx, user, target, true, logs);
         if (ctx.isKongChengProtected(target, CardType.Duel)) {
             logs.push(`${target.name} 的${SkillName.KongCheng}生效，无法成为决斗目标`);
             return logs;
@@ -514,7 +516,8 @@ export function resolveDelayedTrick(ctx, user, usedCard, targetId) {
         const target = ctx.mustGetPlayer(targetId);
         const logs = [`${user.name} 对 ${target.name} 使用 ${usedCard.type}`];
         if (usedCard.type === CardType.Indulgence && isImmuneTo(target, "indulgence")) {
-            logs.push(`${target.name} 的${SkillName.QianXun}生效，不能成为乐不思蜀的目标`);
+            const sourceName = immunitySourceName(target, "indulgence") ?? SkillName.QianXun;
+            logs.push(`${target.name} 的${sourceName}生效，不能成为乐不思蜀的目标`);
             return logs;
         }
         if (usedCard.type === CardType.SuppliesCut && !canReachForDistanceOneTrick(ctx, user, target)) {
