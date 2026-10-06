@@ -1054,6 +1054,31 @@ export class SanGuoGame {
         }
         return this.resolveUsedCard(player, usedCard, targetId, false, selectedCardId);
     }
+    /**
+     * 全体/无指向锦囊的无懈可击询问（无中生有/桃园结义/五谷丰登）：
+     * 使用者本人不参与（无反无懈链时，自己无懈自己的牌没有意义），其余存活角色按座次
+     * 从使用者下家开始依次响应，一人打出即整张抵消。响应者没有无懈可击来源时
+     * `requestCardResponse` 直接返回 false，不会打扰该座位。
+     */
+    async tryNegateGlobal(user, trickType, logs) {
+        const userIndex = this.players.findIndex((player) => player.id === user.id);
+        const start = userIndex >= 0 ? userIndex : 0;
+        for (let offset = 1; offset <= this.players.length; offset += 1) {
+            const responder = this.players[(start + offset) % this.players.length];
+            if (!responder || responder.id === user.id || !responder.alive) {
+                continue;
+            }
+            if (!this.canPlayerRespond(responder.id, "negate")) {
+                continue;
+            }
+            const negated = await this.requestCardResponse(responder, "negate", { cardName: trickType, actorId: user.id }, logs);
+            if (negated) {
+                logs.push(`${responder.name} 打出无懈可击，抵消了 ${trickType}`);
+                return true;
+            }
+        }
+        return false;
+    }
     async resolveUsedCard(player, usedCard, targetId, fromTreasure, selectedCardId) {
         this.discardPile.push(usedCard);
         const logs = [];
@@ -1095,8 +1120,13 @@ export class SanGuoGame {
             logs.push(...(await this.resolveDuel(player, this.mustGetPlayer(targetId), usedCard)));
         }
         else if (usedCard.type === CardType.ExNihilo) {
-            const drawn = this.drawCards(player.id, 2);
-            logs.push(`${player.name} 使用无中生有，摸了 ${drawn} 张牌`);
+            if (await this.tryNegateGlobal(player, usedCard.type, logs)) {
+                logs.push(`${player.name} 的${usedCard.type}被无懈可击抵消`);
+            }
+            else {
+                const drawn = this.drawCards(player.id, 2);
+                logs.push(`${player.name} 使用无中生有，摸了 ${drawn} 张牌`);
+            }
         }
         else if (usedCard.type === CardType.Barbarian) {
             logs.push(...(await this.resolveBarbarian(player, usedCard)));
@@ -1114,10 +1144,20 @@ export class SanGuoGame {
             logs.push(...(await this.resolveCollateral(player, this.mustGetPlayer(targetId))));
         }
         else if (usedCard.type === CardType.PeachGarden) {
-            logs.push(...this.resolvePeachGarden(player));
+            if (await this.tryNegateGlobal(player, usedCard.type, logs)) {
+                logs.push(`${player.name} 的${usedCard.type}被无懈可击抵消`);
+            }
+            else {
+                logs.push(...this.resolvePeachGarden(player));
+            }
         }
         else if (usedCard.type === CardType.Harvest) {
-            logs.push(...this.resolveHarvest(player));
+            if (await this.tryNegateGlobal(player, usedCard.type, logs)) {
+                logs.push(`${player.name} 的${usedCard.type}被无懈可击抵消`);
+            }
+            else {
+                logs.push(...this.resolveHarvest(player));
+            }
         }
         else if (usedCard.type === CardType.Lightning) {
             logs.push(...(await this.resolveDelayedTrick(player, usedCard, player.id)));
@@ -2384,9 +2424,9 @@ export class SanGuoGame {
     hasRemovableCard(player) {
         return cardUtilsHasRemovableCard(player);
     }
-    /** 主公 +1 体力上限：标准身份局总人数 ≥ 5 时生效（rules.md §3.4）。 */
+    /** 主公 +1 体力上限：总人数 ≥ 4 时生效（rules.md §3.4）。 */
     applyLordBonus() {
-        if (this.players.length < 5) {
+        if (this.players.length < 4) {
             return;
         }
         const lord = this.players.find((player) => player.role === PlayerRole.Lord);

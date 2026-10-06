@@ -4,6 +4,7 @@ import { callQwen35PlusDetailed, probeQwenConnectivity } from "./qwen.js";
 import { writeAiLog } from "../devlog/ailog.js";
 import { parseStrategyReview, StrategyMemory } from "./strategy-memory.js";
 import { JevAdvisor } from "./jev-advisor.js";
+import { HybridPlanCache } from "./hybrid-plan.js";
 import { buildMatchGeneralsText } from "./match-context.js";
 const DEFAULT_MAX_CONTEXT_ROUNDS = 30;
 const DEFAULT_THINKING_MS = 1200;
@@ -94,16 +95,16 @@ export class GameAiLoop {
     isHybridJev() {
         return this.fastAdvisor instanceof JevAdvisor;
     }
-    /** Hybrid 回合开始策略规划缓存：playerId -> { turn, plan }，每回合刷新一次。 */
-    planCache = new Map();
+    /** Hybrid 回合开始策略规划缓存：只在 AI 自己回合阻塞等 LLM，响应决策绝不等待（见 hybrid-plan.ts）。 */
+    hybridPlans = new HybridPlanCache((playerId, snapshot) => this.fetchHybridPlan(snapshot, playerId));
     /**
-     * Hybrid 回合开始策略规划：LLM 为玩家制定本回合战略（结合策略记忆），缓存到本回合结束。
+     * Hybrid 回合开始策略规划（唯一真正调用 LLM 的地方）：LLM 为玩家制定本回合战略（结合策略记忆）。
      * 规划失败时回退策略记忆，无记忆则返回 undefined（Jev 无规划决策）。
      */
-    async getHybridPlan(snapshot, agent) {
-        const cached = this.planCache.get(agent.playerId);
-        if (cached && cached.turn === snapshot.turn) {
-            return cached.plan;
+    async fetchHybridPlan(snapshot, playerId) {
+        const agent = this.subAgents.get(playerId);
+        if (!agent) {
+            return undefined;
         }
         const promptPackage = buildPlanPrompt({
             rulesText: this.rulesText,
@@ -124,9 +125,8 @@ export class GameAiLoop {
             { role: "user", content: promptPackage.userPrompt },
         ];
         const callResult = await this.requestDecisionWithRetry(messages, "fast");
-        const fallback = this.getStrategyNotePlan(agent) ?? cached?.plan;
         if (!callResult) {
-            return fallback;
+            return this.getStrategyNotePlan(agent);
         }
         this.writeDecisionLog({
             callResult,
@@ -137,11 +137,15 @@ export class GameAiLoop {
             responseText: callResult.content,
         });
         const plan = callResult.content.trim().slice(0, 500);
-        if (plan) {
-            this.planCache.set(agent.playerId, { turn: snapshot.turn, plan });
-            return plan;
-        }
-        return fallback;
+        return plan || this.getStrategyNotePlan(agent);
+    }
+    /** AI 自己回合开始的规划：允许阻塞等 LLM，失败回退策略记忆/上一回合规划。 */
+    async getHybridPlan(snapshot, agent) {
+        return await this.hybridPlans.ensure(agent.playerId, snapshot.turn, this.getStrategyNotePlan(agent), snapshot);
+    }
+    /** 响应决策用的规划：同步返回（缓存/策略记忆），需要时后台预热，绝不阻塞响应。 */
+    peekHybridPlan(snapshot, agent) {
+        return this.hybridPlans.peek(agent.playerId, snapshot.turn, this.getStrategyNotePlan(agent), snapshot);
     }
     /**
      * 策略记忆规划（原有架构）：取子代理的策略记忆（回合末复盘积累），
@@ -661,7 +665,9 @@ export class GameAiLoop {
             if (!(advisor instanceof JevAdvisor)) {
                 return null;
             }
-            const plan = await this.getHybridPlan(snapshot, agent);
+            // 关键：响应决策只读「缓存/策略记忆」里的规划，绝不再 await 一次 LLM 战略规划——
+            // 否则对手打出一张杀、一次濒死求桃，全桌都要等十几秒到几分钟（表现为「Jev 卡住」）。
+            const plan = this.peekHybridPlan(snapshot, agent);
             const fast = await advisor.decideInteraction(snapshot, playerId, request, plan);
             return fast?.decision ?? null;
         }
