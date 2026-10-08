@@ -15,7 +15,7 @@ DIST="$GAME_REPO/dist"
 (cd "$GAME_REPO" && npm run build)
 
 mkdir -p "$ROOT"/vendor/{engine,agent,network,devlog} "$ROOT"/webui
-for f in game cards interaction types resolve skills skill-hooks generals card-utils ai-heuristics; do
+for f in game cards interaction types resolve skills skill-hooks skill-module skill-registry skill-rules generals card-utils ai-heuristics; do
   cp "$DIST/engine/$f.js" "$ROOT/vendor/engine/"
 done
 for f in ai prompt local-engine round-context turn-decision ollama qwen strategy-memory; do
