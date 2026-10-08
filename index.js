@@ -253,6 +253,8 @@ export default {
       const wss = roomWsServers.get(roomKey) ?? (roomWsServers.set(roomKey, new WebSocketServer({ noServer: true })), roomWsServers.get(roomKey));
       const ip = clientIpOf(req);
       wss.handleUpgrade(req, socket, head, (ws) => {
+        ws.isAlive = true; // 心跳存活标记；pong 回包时复位（WSS 懒创建，监听必须挂在这里，setup 末尾遍历的是空 map）
+        ws.on('pong', () => { ws.isAlive = true; });
         room.wsClients.add(ws);
         room.lastActiveAt = Date.now();
         ws.on('close', () => { room.wsClients.delete(ws); });
@@ -320,9 +322,6 @@ export default {
         }
       }
     });
-    for (const wss of roomWsServers.values()) {
-      wss.on('connection', (ws) => { ws.isAlive = true; ws.on('pong', () => { ws.isAlive = true; }); });
-    }
 
     return () => {
       eventBus.off('message:sent', onMessageSent);
