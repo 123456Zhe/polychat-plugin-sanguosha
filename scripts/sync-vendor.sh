@@ -15,15 +15,18 @@ DIST="$GAME_REPO/dist"
 (cd "$GAME_REPO" && npm run build)
 
 mkdir -p "$ROOT"/vendor/{engine,agent,network,devlog} "$ROOT"/webui
-for f in game cards interaction types resolve skills skill-hooks skill-module skill-registry skill-rules generals card-utils ai-heuristics; do
-  cp "$DIST/engine/$f.js" "$ROOT/vendor/engine/"
-done
-for f in ai prompt local-engine round-context turn-decision ollama qwen strategy-memory; do
-  cp "$DIST/agent/$f.js" "$ROOT/vendor/agent/"
-done
-for f in server protocol line-parser; do
-  cp "$DIST/network/$f.js" "$ROOT/vendor/network/"
-done
+# 同步编译产物：用通配符全量拷贝（跳过 *.test.js），避免上游新增文件时硬编码列表遗漏导致插件加载失败
+sync_js_dir() {
+  for f in "$DIST/$1/"*.js; do
+    case "$(basename "$f")" in
+      *.test.js) ;;
+      *) cp "$f" "$ROOT/vendor/$2/" ;;
+    esac
+  done
+}
+sync_js_dir engine engine
+sync_js_dir agent agent
+sync_js_dir network network
 cp "$DIST/devlog/ailog.js" "$ROOT/vendor/devlog/"
 cp "$GAME_REPO/rules.md" "$ROOT/rules.md"
 # 新版 webui 是 Vue 3 + Vite 产物，输出在 webui/dist/（index.html + assets/）

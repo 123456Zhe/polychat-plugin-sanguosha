@@ -1,0 +1,330 @@
+import { connect } from "node:net";
+import { createInterface } from "node:readline/promises";
+import { homedir } from "node:os";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { randomUUID } from "node:crypto";
+import { describeCard } from "../engine/card-utils.js";
+import { encodeMessage, NETWORK_PROTOCOL_VERSION } from "./protocol.js";
+import { JsonLineParser } from "./line-parser.js";
+const valueOf = (name, fallback) => process.argv.find((arg) => arg.startsWith(`--${name}=`))?.slice(name.length + 3) ?? fallback;
+const port = Number.parseInt(valueOf("port", "9527"), 10);
+const host = valueOf("host", "127.0.0.1");
+const name = valueOf("name", `玩家${Math.floor(Math.random() * 1000)}`);
+/**
+ * 调试参数：`--general=<武将名>` 直接指定本座位武将（缺省由服务端随机分配）。
+ * **房主必须先用 `--allow-general-pick` 开启**（默认关闭，未开启时服务端直接拒绝该 join）。
+ * 名称必须与**主机已加载的武将池**完全一致——host 默认只加载内置武将（`--generals-pool=builtin`），
+ * 外部武将包需要主机用 `--generals-pool=all` 启动；不在池中或已被别人选走时服务端同样会明确拒绝。
+ */
+const general = valueOf("general", "").trim();
+if (general) {
+    console.log(`调试参数：指定武将「${general}」（房主需以 --allow-general-pick 启动且该武将存在于已加载的武将池）`);
+}
+let socket = connect({ host, port });
+let parser = new JsonLineParser();
+const rl = createInterface({ input: process.stdin, output: process.stdout });
+let asking = false;
+let lastPlayers = [];
+let playerId = null;
+// 座位令牌（welcome 里由服务端签发）：重连时证明"这个座位是我的"。
+// CLI 的 playerId 只存在内存里（重启后本就无法重连），因此令牌同样只需内存保存——
+// 它覆盖了 CLI 全部重连场景，服务器不必再退回到"原设备指纹"兜底。
+let seatToken = null;
+let reconnectAttempts = 0;
+const MAX_RECONNECT_ATTEMPTS = 10;
+let left = false;
+let _interacting = false; // tracks if an interaction prompt is active
+let _msgQueue = []; // sequential message queue
+let _processingMsg = false; // queue processing guard
+// 机器标识：持久化在 ~/.clisanguo/machine-id，供服务器做“同机单账号”校验
+// （与 WebUI 的 localStorage 各自持久化；同一台机器的 CLI 多开可被识别，跨端以名字为准）。
+const machineId = (() => {
+    try {
+        const dir = join(homedir(), ".clisanguo");
+        const file = join(dir, "machine-id");
+        if (existsSync(file)) {
+            const existing = readFileSync(file, "utf8").trim();
+            if (existing)
+                return existing;
+        }
+        const generated = `cli-${randomUUID()}`;
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(file, generated);
+        return generated;
+    }
+    catch {
+        return `cli-${randomUUID()}`; // 无法持久化时降级：每次随机，同机多开无法识别
+    }
+})();
+const send = (message) => {
+    if (!socket.destroyed)
+        socket.write(encodeMessage(message));
+};
+const equipmentName = (value) => value ?? "无";
+const choose = async (prompt, count) => {
+    while (true) {
+        const picked = Number.parseInt((await rl.question(prompt)).trim(), 10) - 1;
+        if (Number.isInteger(picked) && picked >= 0 && picked < count)
+            return picked;
+        console.log("请输入有效编号");
+    }
+};
+const chooseTarget = async (action, players) => {
+    if (!action.requiresTarget)
+        return undefined;
+    const targets = action.targets.map((id) => players.find((player) => player.id === id)).filter((player) => Boolean(player));
+    targets.forEach((target, index) => console.log(`${index + 1}. ${target.name}`));
+    return targets[await choose("选择目标: ", targets.length)]?.id;
+};
+const chooseTargetCard = async (options) => {
+    if (!options || options.length === 0)
+        return undefined;
+    console.log("可选择目标的牌：");
+    options.forEach((option, index) => console.log(`${index + 1}. ${option.label}`));
+    return options[await choose("选择牌: ", options.length)]?.id;
+};
+const playerName = (id) => lastPlayers.find((player) => player.id === id)?.name ?? id;
+const handleInteraction = async (request) => {
+    _interacting = true;
+    try {
+        if (request.kind === "respond") {
+            console.log(`\n${request.reason}`);
+            request.sources.forEach((source, index) => console.log(`${index + 1}. ${source.label}`));
+            console.log(`${request.sources.length + 1}. 不应对`);
+            const picked = await choose("请选择: ", request.sources.length + 1);
+            const source = request.sources[picked];
+            send({ type: "interaction", decision: source ? { choice: "card", sourceId: source.sourceId } : { choice: "pass" } });
+            return;
+        }
+        if (request.kind === "collateral") {
+            console.log(`\n${request.reason}`);
+            request.victims.forEach((victimId, index) => console.log(`${index + 1}. 对 ${playerName(victimId)} 使用杀`));
+            if (request.allowHandOverWeapon)
+                console.log(`${request.victims.length + 1}. 交出武器`);
+            const count = request.victims.length + (request.allowHandOverWeapon ? 1 : 0);
+            const picked = await choose("请选择: ", count);
+            const victimId = request.victims[picked];
+            if (victimId) {
+                if (request.sources.length > 1) {
+                    console.log("选择用于响应的杀：");
+                    request.sources.forEach((source, index) => console.log(`${index + 1}. ${source.label}`));
+                    const sourcePicked = await choose("请选择: ", request.sources.length);
+                    const source = request.sources[sourcePicked];
+                    send({ type: "interaction", decision: { choice: "target", targetId: victimId, ...(source ? { sourceId: source.sourceId } : {}) } });
+                }
+                else {
+                    send({ type: "interaction", decision: { choice: "target", targetId: victimId } });
+                }
+            }
+            else {
+                send({ type: "interaction", decision: { choice: "pass" } });
+            }
+            return;
+        }
+        if (request.kind === "choose-suit") {
+            const suitLabels = { heart: "红桃", diamond: "方片", club: "梅花", spade: "黑桃" };
+            console.log(`\n${request.reason}`);
+            request.suits.forEach((suit, index) => console.log(`${index + 1}. 声明${suitLabels[suit] ?? suit}`));
+            const picked = await choose("请选择: ", request.suits.length);
+            const suit = request.suits[picked] ?? request.suits[0] ?? "heart";
+            send({ type: "interaction", decision: { choice: "suit", suit } });
+            return;
+        }
+        if (request.kind === "choose-discard") {
+            console.log(`\n${request.reason}`);
+            request.sources.forEach((source, index) => console.log(`${index + 1}. ${source.label}`));
+            if (request.allowPass) {
+                console.log(`${request.sources.length + 1}. ${request.passLabel ?? "放弃"}`);
+            }
+            const count = request.sources.length + (request.allowPass ? 1 : 0);
+            const picked = await choose("请选择: ", count);
+            const source = request.sources[picked];
+            send({ type: "interaction", decision: source ? { choice: "card", sourceId: source.sourceId } : { choice: "pass" } });
+            return;
+        }
+        if (request.kind === "optional-effect") {
+            console.log(`\n${request.reason}`);
+            console.log("1. 发动\n2. 不发动");
+            send({ type: "interaction", decision: { choice: "effect", enabled: await choose("请选择: ", 2) === 0 } });
+            return;
+        }
+        console.log("未处理的交互类型：%s", request.kind);
+    }
+    finally {
+        _interacting = false;
+    }
+};
+// Sequential message queue: prevents concurrent message processing
+// so e.g. state updates never clear() over an interaction prompt.
+const enqueueMessage = (msg) => {
+    _msgQueue.push(msg);
+    if (!_processingMsg)
+        processNextMessage();
+};
+const processNextMessage = async () => {
+    if (_processingMsg || _msgQueue.length === 0)
+        return;
+    _processingMsg = true;
+    try {
+        const msg = _msgQueue.shift();
+        if (msg)
+            await handle(msg);
+    }
+    finally {
+        _processingMsg = false;
+        processNextMessage();
+    }
+};
+const handle = async (message) => {
+    if (message.type === "welcome") {
+        console.log(`已加入房间，你的 ID：${message.playerId}`);
+        playerId = message.playerId;
+        if (message.seatToken)
+            seatToken = message.seatToken;
+        reconnectAttempts = 0;
+    }
+    else if (message.type === "lobby")
+        console.log(`等待玩家 (${message.players.length}/${message.roomSize})：${message.players.map((p) => p.name).join("、")}`);
+    else if (message.type === "error") {
+        console.error(`错误：${message.message}`);
+        // 调试参数 --general 指定失败（房主未开启 / 不在武将池 / 已被选走）：换时间重试也不可能成功，
+        // 直接退出并给出提示，而不是空转 10 次自动重连、每次重复同一条错误。
+        if (!playerId && message.message.includes("武将")) {
+            console.error(message.message.includes("未开启武将自选")
+                ? "房主未开启武将自选：请去掉 --general 后重新加入，或让房主以 --allow-general-pick 启动"
+                : "请检查 --general=<武将名>：需与主机已加载的武将池完全一致（外部武将包要求主机以 --generals-pool=all 启动）");
+            left = true;
+            void rl.close();
+            socket.end();
+            return;
+        }
+        if (message.message.includes("座位令牌")) {
+            // 令牌失效或座位被复用：清掉本机座位，避免无限重连失败，提示用户按名字重新加入。
+            seatToken = null;
+            playerId = null;
+            console.error("座位令牌已失效，请重新运行客户端按名字加入房间");
+        }
+    }
+    else if (message.type === "closed") {
+        console.log(message.message);
+        left = true;
+        socket.end();
+    }
+    else if (message.type === "player_disconnected") {
+        console.log(`${message.playerName} 已断线，AI 已托管其座位，可随时重连取回控制权`);
+    }
+    else if (message.type === "player_reconnected") {
+        console.log(`${message.playerName} 已重连`);
+    }
+    else if (message.type === "reconnect_ok") {
+        console.log(`已重连，你的 ID：${message.playerId}`);
+        playerId = message.playerId;
+        reconnectAttempts = 0;
+    }
+    else if (message.type === "interaction") {
+        await handleInteraction(message.request);
+    }
+    else if (message.type === "state") {
+        lastPlayers = message.snapshot.players.map((player) => ({ id: player.id, name: player.name }));
+        if (!_interacting) {
+            console.clear();
+        }
+        else {
+            console.log("\n--- 状态更新 (技能询问中) ---");
+        }
+        console.log(message.logs.map((line) => `- ${line}`).join("\n"));
+        console.log("\n战场：");
+        for (const player of message.snapshot.players) {
+            const cards = player.hand ? player.hand.map((card) => describeCard(card)).join("、") || "无" : `${player.handCount} 张`;
+            console.log(`${player.id === message.snapshot.currentPlayerId ? ">" : " "} ${player.name} [${player.general}]  身份:${player.role}  体力:${Math.max(0, player.hp)}/${player.maxHp}  手牌:${cards}  状态:${player.faceDown ? "翻面" : "正面"}${player.chained ? "·连环" : ""}`);
+            console.log(`  装备 | 武器:${equipmentName(player.weapon)} | 防具:${equipmentName(player.armor)} | 进攻马:${equipmentName(player.attackHorse)} | 防御马:${equipmentName(player.defenseHorse)} | 宝物:${equipmentName(player.treasure)}`);
+        }
+        if (message.snapshot.gameOver) {
+            console.log(`\n游戏结束：${message.snapshot.winner}`);
+            return;
+        }
+        if (asking || (message.actions.length === 0 && message.pendingDiscardCount === 0)) {
+            console.log("\n等待其他玩家行动...");
+            return;
+        }
+        asking = true;
+        try {
+            if (message.pendingDiscardCount > 0) {
+                const me = message.snapshot.players.find((player) => player.id === message.snapshot.currentPlayerId);
+                const usable = [...(me?.hand ?? []).map((card) => describeCard(card)), ...(me?.treasureCards ?? []).map((card) => `${describeCard(card)}（木牛流马）`)];
+                usable.forEach((label, index) => console.log(`${index + 1}. ${label}`));
+                send({ type: "discard", handIndex: await choose(`弃置一张牌（还需 ${message.pendingDiscardCount} 张）: `, usable.length) });
+            }
+            else {
+                console.log("\n可执行动作：");
+                message.actions.forEach((action, index) => console.log(`${index + 1}. ${action.label}`));
+                const actionIndex = await choose("选择动作: ", message.actions.length);
+                const action = message.actions[actionIndex];
+                if (!action)
+                    return;
+                const targetId = action.type === "end" ? undefined : await chooseTarget(action, message.snapshot.players);
+                // 只有顺手牵羊/过河拆桥这类需要从目标处选牌的行动才弹选牌提示（needsTargetCard 由服务端标记）
+                const selectedCardId = targetId && action.type === "play" && action.needsTargetCard
+                    ? await chooseTargetCard(message.removableCards[targetId])
+                    : undefined;
+                send({ type: "action", actionIndex, ...(targetId ? { targetId } : {}), ...(selectedCardId ? { selectedCardId } : {}) });
+            }
+        }
+        finally {
+            asking = false;
+        }
+    }
+};
+const attemptReconnect = async () => {
+    if (left || !playerId) {
+        console.log("连接已断开，你可以重新运行客户端尝试重连");
+        return;
+    }
+    reconnectAttempts += 1;
+    if (reconnectAttempts > MAX_RECONNECT_ATTEMPTS) {
+        console.log(`重连失败 (${MAX_RECONNECT_ATTEMPTS} 次均失败)`);
+        return;
+    }
+    const delay = Math.min(500 * Math.pow(2, reconnectAttempts - 1), 15000);
+    console.log(`连接断开，尝试重连 (${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})，${delay}ms 后...`);
+    await new Promise((resolve) => setTimeout(resolve, delay));
+    try {
+        socket = connect({ host, port, timeout: 5000 });
+        parser = new JsonLineParser();
+        bindSocket(socket, parser);
+        await new Promise((resolve, reject) => {
+            socket.once("error", reject);
+            socket.once("connect", resolve);
+        });
+        console.log("重连成功");
+        reconnectAttempts = 0;
+    }
+    catch (error) {
+        console.error(`重连失败：${error.message}`);
+        void attemptReconnect();
+    }
+};
+const bindSocket = (s, p) => {
+    s.setEncoding("utf8");
+    s.on("connect", () => {
+        s.write(encodeMessage({ type: "source", machineId }));
+        if (playerId) {
+            s.write(encodeMessage({
+                type: "reconnect",
+                playerId,
+                version: NETWORK_PROTOCOL_VERSION,
+                ...(seatToken ? { seatToken } : {}),
+            }));
+        }
+        else {
+            send({ type: "join", name, version: NETWORK_PROTOCOL_VERSION, ...(general ? { general } : {}) });
+        }
+    });
+    s.on("data", (chunk) => { for (const message of p.push(chunk))
+        enqueueMessage(message); });
+    s.on("error", (error) => { console.error(`连接失败：${error.message}`); void rl.close(); });
+    s.on("close", () => { if (!left)
+        void attemptReconnect(); });
+};
+bindSocket(socket, parser);
