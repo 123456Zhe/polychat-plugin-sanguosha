@@ -1,5 +1,6 @@
 import { callJevSystemOne, isJevConfigured, resolveJevAcceptThreshold } from "./jev.js";
 import { LocalAiEngine } from "./local-engine.js";
+import { buildRoomRulesText } from "./prompt.js";
 import { PlayerRole } from "../engine/game.js";
 import { buildMatchGeneralsText } from "./match-context.js";
 import { writeAiLog } from "../devlog/ailog.js";
@@ -365,6 +366,7 @@ const decisionsState = (snapshot, playerId, candidates, proposed, plan, guesses 
     ...(proposed ? { proposed_decision: proposed } : {}),
     ...(plan ? { strategic_plan: plan } : {}),
     role_guesses: describeRoleGuesses(guesses),
+    room_rules: buildRoomRulesText(snapshot.players.length),
 });
 /** 身份推断喂给 Jev：公开的直给，隐藏的只给行为结论（与规则助手同一账本）。 */
 const describeRoleGuesses = (guesses) => guesses.map((guess) => {
@@ -384,6 +386,7 @@ const interactionState = (snapshot, playerId, request, plan) => ({
         available_sources: "sources" in request ? request.sources.map((source) => source.label).join(", ") : "none",
     },
     ...(plan ? { strategic_plan: plan } : {}),
+    room_rules: buildRoomRulesText(snapshot.players.length),
 });
 const describePlayerContext = (snapshot, playerId) => {
     const self = snapshot.players.find((item) => item.id === playerId);
