@@ -10,9 +10,10 @@
 //   - `GET /api/sanguosha/*` 由插件路由提供：静态页（注入 WS 路径）+ `/me`（会话账号名）。
 //   - `WS /api/sanguosha/ws?room=<key>` 走 server.on('upgrade')（onebot 同款模式）：
 //     cookie/Bearer 会话鉴权后，WS 消息与 TCP GameServer 双向透传（换行 JSON 协议原样复用），
-//     join 名字强制替换为 polychat 账号名，source 消息补浏览器真实 IP。
+//     join 名字强制替换为 polychat 账号名，source 消息补浏览器真实 IP + 插件下发的设备标识（不信任客户端 machineId）。
 //   - 聊天室公告 = 核心同款 INSERT INTO messages + broadcast，无需改动核心消息链路。
 import { createConnection } from 'node:net';
+import { randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -46,6 +47,27 @@ function sessionUserOf(req, db) {
 function clientIpOf(req) {
   const fwd = String(req.headers['x-forwarded-for'] || '').split(',')[0]?.trim();
   return fwd || req.socket.remoteAddress || 'unknown';
+}
+
+// ── 同机校验的机器标识：不再信任客户端传来的 machineId ──
+// 插件在发对局页时给浏览器下发一个 HttpOnly 的 sgs_device cookie（随机串，页面 JS 读不到也改不了），
+// WS 升级时从 Cookie 里取它作为机器标识；客户端 source 消息里的 machineId 一律忽略。
+// 这样改 localStorage 里的 sgsMachineId 不再影响指纹；删 cookie 能换身份是任何浏览器标识方案的固有限制，
+// 但座位令牌（welcome.seatToken）仍会挡住顶座，见 vendor/network/server.js 的 verifySeatClaim。
+const DEVICE_COOKIE = 'sgs_device';
+const DEVICE_TOKEN_RE = /^[A-Za-z0-9_-]{16,128}$/;
+function deviceTokenOf(req) {
+  const cookies = Object.fromEntries(
+    (req.headers.cookie || '').split(';').filter(Boolean).map((part) => {
+      const idx = part.indexOf('=');
+      return idx === -1 ? [part.trim(), ''] : [part.slice(0, idx).trim(), part.slice(idx + 1).trim()];
+    })
+  );
+  const token = cookies[DEVICE_COOKIE] || '';
+  return DEVICE_TOKEN_RE.test(token) ? token : null;
+}
+function newDeviceToken() {
+  return randomBytes(16).toString('hex');
 }
 
 const MIME = {
@@ -218,7 +240,13 @@ export default {
         if (roomParam && rooms.has(roomParam)) wsPath = `/api/sanguosha/ws?room=${encodeURIComponent(roomParam)}`;
         else if (!roomParam && rooms.size === 1) wsPath = `/api/sanguosha/ws?room=${encodeURIComponent([...rooms.keys()][0])}`;
         const html = body.replace('</head>', `<script>window.__SG_WS_PATH__ = ${JSON.stringify(wsPath)};</script></head>`);
-        res.writeHead(200, { 'content-type': MIME['.html'], 'cache-control': 'no-cache' });
+        // 下发机器标识 cookie（缺失时才发；已有则沿用，保证同一浏览器始终同一身份）：
+        // WS 升级时插件用它代替客户端 machineId 做同机校验。
+        const headers = { 'content-type': MIME['.html'], 'cache-control': 'no-cache' };
+        if (!deviceTokenOf(req)) {
+          headers['set-cookie'] = `${DEVICE_COOKIE}=${newDeviceToken()}; Path=/api/sanguosha/; Max-Age=31536000; HttpOnly; SameSite=Lax`;
+        }
+        res.writeHead(200, headers);
         res.end(html);
         return;
       }
@@ -250,6 +278,13 @@ export default {
         socket.write('HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n');
         return socket.destroy();
       }
+      // 机器标识必须来自插件下发的 cookie：直连 WS（不经对局页、没有合法 cookie）不予放行，
+      // 否则攻击者绕开页面直接发 source 就能自选 machineId，等于没修。
+      const deviceId = deviceTokenOf(req);
+      if (!deviceId) {
+        socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
+        return socket.destroy();
+      }
       const wss = roomWsServers.get(roomKey) ?? (roomWsServers.set(roomKey, new WebSocketServer({ noServer: true })), roomWsServers.get(roomKey));
       const ip = clientIpOf(req);
       wss.handleUpgrade(req, socket, head, (ws) => {
@@ -258,13 +293,13 @@ export default {
         room.wsClients.add(ws);
         room.lastActiveAt = Date.now();
         ws.on('close', () => { room.wsClients.delete(ws); });
-        pipeToGame(ws, room, user, ip);
+        pipeToGame(ws, room, user, ip, deviceId);
       });
     };
     server.on('upgrade', onUpgrade);
 
-    // 消息透传：WS <-> TCP GameServer（换行 JSON 协议原样复用，join 名强制绑定账号，source 补 IP）。
-    function pipeToGame(ws, room, user, ip) {
+    // 消息透传：WS <-> TCP GameServer（换行 JSON 协议原样复用，join 名强制绑定账号，source 补 IP 与设备标识）。
+    function pipeToGame(ws, room, user, ip, deviceId) {
       const tcp = createConnection({ host: '127.0.0.1', port: room.port });
       const parser = new JsonLineParser();
       let tcpReady = false;
@@ -280,13 +315,22 @@ export default {
       tcp.on('data', (chunk) => { for (const msg of parser.push(chunk)) ws.send(JSON.stringify(msg)); });
       tcp.on('error', () => ws.close());
       tcp.on('close', () => ws.close());
+      // 是否已向 GameServer 发过 source：客户端若故意不发 source，服务端会把它当“未验证连接”
+      // 跳过同机校验，因此 join 前必须保证 source 已发（客户端发了就改写它，没发就由插件代发）。
+      let sourceSent = false;
       ws.on('message', (raw) => {
         let payload = String(raw);
         try {
           const parsed = JSON.parse(payload);
           if (parsed?.type === 'source') {
-            payload = JSON.stringify({ type: 'source', ip, machineId: String(parsed.machineId ?? '') });
+            // 不信任客户端 machineId：改用插件下发的设备 cookie 值，改 localStorage 再也绕不过。
+            payload = JSON.stringify({ type: 'source', ip, machineId: deviceId });
+            sourceSent = true;
           } else if (parsed?.type === 'join') {
+            if (!sourceSent) {
+              pending.push(JSON.stringify({ type: 'source', ip, machineId: deviceId }));
+              sourceSent = true;
+            }
             // 自动绑定 polychat 账号：不信任客户端自填名
             payload = JSON.stringify({ type: 'join', name: user.username, version: Number(parsed.version ?? 4) });
           }
