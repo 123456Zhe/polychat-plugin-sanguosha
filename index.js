@@ -244,7 +244,7 @@ export default {
         // WS 升级时插件用它代替客户端 machineId 做同机校验。
         const headers = { 'content-type': MIME['.html'], 'cache-control': 'no-cache' };
         if (!deviceTokenOf(req)) {
-          headers['set-cookie'] = `${DEVICE_COOKIE}=${newDeviceToken()}; Path=/api/sanguosha/; Max-Age=31536000; HttpOnly; SameSite=Lax`;
+          headers['set-cookie'] = `${DEVICE_COOKIE}=${newDeviceToken()}; Path=/api/sanguosha/; Max-Age=31536000; HttpOnly; Secure; SameSite=Lax`;
         }
         res.writeHead(200, headers);
         res.end(html);
