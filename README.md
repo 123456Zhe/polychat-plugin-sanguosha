@@ -70,6 +70,7 @@ PolyChat 插件：把 [CLI-SanGuoSha](https://github.com/123456Zhe/Cli-SanGuoSha
 PolyChat 单进程
 ├── GET  /api/sanguosha/         静态页（注入 __SG_WS_PATH__）
 ├── GET  /api/sanguosha/{app.js,style.css}
+├── GET  /api/sanguosha/assets/*  webui 构建产物（chunk/图片/字体等静态文件，见 index.js 的放行规则）
 ├── GET  /api/sanguosha/me       会话账号名（cookie/Bearer 鉴权）
 ├── WS   /api/sanguosha/ws?room=  cookie 鉴权 → WS↔TCP 双向透传（换行 JSON 协议）
 └── 进程内 GameServer（127.0.0.1 随机端口，每聊天室一局）
@@ -80,12 +81,15 @@ PolyChat 单进程
 要点：
 
 - **身份**：对局页以 PolyChat 会话账号为座位名（服务端强制替换 `join` 的 name，不信任客户端自填）；
-  机器标识（同机单账号校验）沿用浏览器 localStorage，`source` 消息由插件补浏览器真实 IP。
+  机器标识（同机单账号校验）用插件下发的 HttpOnly `sgs_device` cookie（随机串，页面 JS 读不到也改不了），
+  WS 升级时从 Cookie 取它作为机器标识，客户端 `source` 消息里的 machineId 一律忽略；
+  `source` 消息由插件补浏览器真实 IP（取 X-Forwarded-For 末跳）。
 - **协议**：完全复用 CLI-SanGuoSha 联机 TCP 协议（换行分隔 JSON，`NETWORK_PROTOCOL_VERSION`），
   浏览器客户端零逻辑改动，仅 WS 地址可配置（`window.__SG_WS_PATH__`）。
 - **公告**：建房/回收消息 = 核心同款 `INSERT INTO messages` + `broadcast`，不经过改动核心消息链路。
 - **vendor/**：CLI-SanGuoSha 编译产物快照（`npm run build` 的 dist 子集）+ `rules.md` + `webui/`。
-  上游更新后用 `scripts/sync-vendor.sh` 重建。
+  快照对应的上游 commit 与同步时间见 `vendor/VENDOR_VERSION`；上游更新后用 `scripts/sync-vendor.sh` 重建。
+  本地修复补丁机制见 `scripts/apply-local-patches.sh`（当前无本地补丁，两项旧补丁已随上游合入而移除）。
 
 ## 开发
 

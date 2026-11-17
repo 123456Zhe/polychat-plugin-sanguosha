@@ -1,6 +1,6 @@
 {
   "name": "polychat-plugin-sanguosha",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "PolyChat 插件：三国杀联机。聊天室 /sanguosha 命令建房 + 公告拉人 + 独立对局页（host-authoritative，AI 座位、断线托管、自动续局）",
   "type": "module",
   "main": "index.js",

@@ -44,9 +44,11 @@ function sessionUserOf(req, db) {
   ).get(token, Date.now()) || null;
 }
 
+// 客户端 IP：只取 X-Forwarded-For 的末跳——首值是客户端自填的、可伪造；
+// 末跳是由受信反代（Caddy）追加的真实来源 IP。单反代部署下末跳即客户端 IP。
 function clientIpOf(req) {
-  const fwd = String(req.headers['x-forwarded-for'] || '').split(',')[0]?.trim();
-  return fwd || req.socket.remoteAddress || 'unknown';
+  const parts = String(req.headers['x-forwarded-for'] || '').split(',').map((s) => s.trim()).filter(Boolean);
+  return parts[parts.length - 1] || req.socket.remoteAddress || 'unknown';
 }
 
 // ── 同机校验的机器标识：不再信任客户端传来的 machineId ──
@@ -74,7 +76,31 @@ const MIME = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
+  '.map': 'application/json; charset=utf-8',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.svg': 'image/svg+xml',
+  '.webp': 'image/webp',
+  '.ico': 'image/x-icon',
+  '.woff': 'font/woff',
+  '.woff2': 'font/woff2',
+  '.ttf': 'font/ttf',
 };
+
+// webui 资产放行规则：路径每段仅限 [A-Za-z0-9_-] 与点号分隔的扩展名、后缀必须在白名单内，
+// 天然排除 ../ 穿越、隐藏文件（.env 等）与可执行/敏感后缀；允许一级子目录（如 img/logo.png）。
+const ASSET_EXTS = new Set(['js', 'css', 'map', 'png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'ico', 'woff', 'woff2', 'ttf']);
+function isSafeAssetName(name) {
+  if (!name || name.length > 256) return false;
+  const segments = name.split('/');
+  for (const seg of segments) {
+    if (!/^[\w-]+(\.[\w-]+)*$/.test(seg)) return false;
+  }
+  const last = segments[segments.length - 1];
+  return last.includes('.') && ASSET_EXTS.has(last.split('.').pop());
+}
 
 const DEFAULT_CONFIG = {
   maxRooms: 3,              // 同时进行的最多对局数
@@ -113,6 +139,7 @@ export default {
 
     /** roomKey -> { server, port, chatRoomId, creatorId, playerCount, aiCount, lastActiveAt, wsClients, gameOverNotified } */
     const rooms = new Map();
+    const pendingRooms = new Set(); // 正在 listen() 的 roomKey：防两条 /sanguosha 同时到达建出两个 GameServer
     const roomWsServers = new Map(); // roomKey -> WebSocketServer (noServer)
 
     // ── 聊天室公告：与核心 POST /api/rooms/:id/messages 完全一致的落库 + 广播 ──
@@ -135,36 +162,55 @@ export default {
     // ── 建房：aiCount=0 为全真人房间（人齐才开局；AI 仅断线托管用）；
     //    aiCount>0 时按指定数量补 AI 座位，真人坐满剩余座位（humanSlots）即开局。 ──
     async function createRoom(roomKey, chatRoomId, creatorId, playerCount, aiCount) {
-      const gameServer = new GameServer({
-        host: '127.0.0.1',
-        port: 0,
-        playerCount,
-        openingHandCount: cfg.openingHandCount,
-        autoRestartAfterGameOver: false, // 下一局由真人确认后 requestRestart()
-        allowMultiConnectionsPerSource: cfg.allowMultiSource,
-        aiCount: aiCount || 0, // 空位不由 AI 代占：直到人齐才开局（aiCount=0）或真人坐满 humanSlots 立即开局（aiCount>0）
-        aiDriver: cfg.aiDriver,
-        rulesPath: join(PLUGIN_ROOT, 'rules.md'),
-      });
-      const port = await gameServer.listen();
-      const room = {
-        server: gameServer,
-        port,
-        chatRoomId,
-        creatorId,
-        playerCount,
-        aiCount: aiCount || 0,
-        lastActiveAt: Date.now(),
-        wsClients: new Set(),
-        gameOverNotified: false, // 对局结束是否已向聊天室发过「确认续局」公告
-      };
-      rooms.set(roomKey, room);
-      const link = `${publicBaseUrl}/api/sanguosha/?room=${encodeURIComponent(roomKey)}`;
-      const modeText = aiCount > 0
-        ? `创建了三国杀${playerCount}人局（AI×${aiCount}，${playerCount - aiCount} 名真人即可立即开局）。`
-        : `创建了三国杀${playerCount}人局（全真人，人齐开局）。`;
-      postChatMessage(chatRoomId, creatorId, `${modeText}[点击加入对局](${link})；其他玩家也可直接打开：${link}`);
-      return room;
+      let gameServer;
+      let registered = false;
+      try {
+        // 同步占位：本函数的同步前缀与调用方的 rooms/pendingRooms 检查在同一 tick 内执行，
+        // 因此第二条 /sanguosha 一定能看到 pending 标记，不会再建第二个 GameServer。
+        pendingRooms.add(roomKey);
+        gameServer = new GameServer({
+          host: '127.0.0.1',
+          port: 0,
+          playerCount,
+          openingHandCount: cfg.openingHandCount,
+          autoRestartAfterGameOver: false, // 下一局由真人确认后 requestRestart()
+          allowMultiConnectionsPerSource: cfg.allowMultiSource,
+          aiCount: aiCount || 0, // 空位不由 AI 代占：直到人齐才开局（aiCount=0）或真人坐满 humanSlots 立即开局（aiCount>0）
+          aiDriver: cfg.aiDriver,
+          rulesPath: join(PLUGIN_ROOT, 'rules.md'),
+        });
+        const port = await gameServer.listen();
+        // 防御性复查：listen 期间若已有同 key 房间（理论上不应发生），关掉重复项、用已有的。
+        if (rooms.has(roomKey)) {
+          await gameServer.close().catch(() => {});
+          return rooms.get(roomKey);
+        }
+        const room = {
+          server: gameServer,
+          port,
+          chatRoomId,
+          creatorId,
+          playerCount,
+          aiCount: aiCount || 0,
+          lastActiveAt: Date.now(),
+          wsClients: new Set(),
+          gameOverNotified: false, // 对局结束是否已向聊天室发过「确认续局」公告
+        };
+        rooms.set(roomKey, room);
+        registered = true;
+        const link = `${publicBaseUrl}/api/sanguosha/?room=${encodeURIComponent(roomKey)}`;
+        const modeText = aiCount > 0
+          ? `创建了三国杀${playerCount}人局（AI×${aiCount}，${playerCount - aiCount} 名真人即可立即开局）。`
+          : `创建了三国杀${playerCount}人局（全真人，人齐开局）。`;
+        postChatMessage(chatRoomId, creatorId, `${modeText}[点击加入对局](${link})；其他玩家也可直接打开：${link}`);
+        return room;
+      } catch (error) {
+        // 建房失败：未注册进 rooms 的 GameServer 随手关掉，防止半构造实例泄漏监听端口。
+        if (gameServer && !registered) await gameServer.close().catch(() => {});
+        throw error;
+      } finally {
+        pendingRooms.delete(roomKey);
+      }
     }
 
     async function destroyRoom(roomKey, reason) {
@@ -204,7 +250,11 @@ export default {
         postChatMessage(roomId, sender.id, `本聊天室已有一局三国杀进行中：${publicBaseUrl}/api/sanguosha/?room=${encodeURIComponent(roomKey)}`);
         return;
       }
-      if (rooms.size >= cfg.maxRooms) {
+      if (pendingRooms.has(roomKey)) {
+        postChatMessage(roomId, sender.id, '三国杀对局正在创建中，请稍候片刻再查看公告');
+        return;
+      }
+      if (rooms.size + pendingRooms.size >= cfg.maxRooms) {
         postChatMessage(roomId, sender.id, `同时进行的对局已达上限（${cfg.maxRooms}），请稍后再试`);
         return;
       }
@@ -253,10 +303,11 @@ export default {
       if (tail === 'app.js' || tail === 'style.css') {
         return staticFile(req, res, url, tail);
       }
-      // 新版 webui 资产：assets/index-*.js / assets/index-*.css
+      // webui 构建资产：assets/ 下的任意静态文件（Vite 产物不止 index-*，还有 chunk/图片/字体），
+      // 具体放行规则见 isSafeAssetName（防 ../ 穿越与敏感后缀）。
       if (tail.startsWith('assets/')) {
         const assetName = tail.slice('assets/'.length);
-        if (/^index-[\w-]+\.(js|css)$/.test(assetName)) {
+        if (isSafeAssetName(assetName)) {
           return staticFile(req, res, url, `assets/${assetName}`);
         }
       }
