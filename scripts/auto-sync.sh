@@ -47,7 +47,7 @@ log "同步 vendor..."
     log "❌ sync-vendor 失败，跳过本次同步"; exit 1
 }
 
-# 4.5 重放本地修复补丁（上游未合入的 bugfix：ailog EACCES 崩溃、webui 自动连接等）
+# 4.5 重放本地修复补丁（当前无本地补丁，脚本为占位；将来有上游未合入的修复时再启用）
 log "重放本地补丁..."
 "$REPO_DIR/scripts/apply-local-patches.sh" >> "$LOG_FILE" 2>&1 || {
     log "❌ apply-local-patches 失败，跳过本次同步"; exit 1

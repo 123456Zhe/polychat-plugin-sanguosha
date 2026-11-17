@@ -33,5 +33,10 @@ cp "$GAME_REPO/rules.md" "$ROOT/rules.md"
 rm -rf "$ROOT/webui" && mkdir -p "$ROOT/webui/assets"
 cp "$GAME_REPO/webui/dist/index.html" "$ROOT/webui/"
 cp "$GAME_REPO/webui/dist/assets/"* "$ROOT/webui/assets/"
+# 记录快照来源（上游 commit + 同步时间），供核对版本
+{
+  echo "upstream: $(cd "$GAME_REPO" && git rev-parse HEAD 2>/dev/null || echo unknown)"
+  echo "synced_at: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+} > "$ROOT/vendor/VENDOR_VERSION"
 
 echo "vendor 快照已更新（engine/agent/network/devlog + rules.md + webui）"
