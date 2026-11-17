@@ -178,6 +178,16 @@ const validateGeneralJson = (raw, packName) => {
     if (!Array.isArray(obj.skills) || obj.skills.some((skill) => !isString(skill))) {
         throw new Error(`${packName}: general.json skills 必须为字符串数组`);
     }
+    if ("latentSkills" in obj) {
+        // Phase 8：潜在技能（觉醒获得类）。与 skills 不得重叠，loader 会加载并注册它们但不开局持有。
+        if (!Array.isArray(obj.latentSkills) || obj.latentSkills.some((skill) => !isString(skill))) {
+            throw new Error(`${packName}: general.json latentSkills 必须为字符串数组`);
+        }
+        const overlap = obj.latentSkills.filter((skill) => obj.skills.includes(skill));
+        if (overlap.length > 0) {
+            throw new Error(`${packName}: general.json latentSkills 与 skills 重叠（${overlap.join("、")}）：一个技能不能既开局持有又潜在`);
+        }
+    }
     if ("description" in obj && typeof obj.description !== "string") {
         throw new Error(`${packName}: general.json description 必须为字符串`);
     }
@@ -187,6 +197,7 @@ const validateGeneralJson = (raw, packName) => {
         gender: obj.gender,
         maxHp: obj.maxHp,
         skills: obj.skills,
+        ...(Array.isArray(obj.latentSkills) ? { latentSkills: obj.latentSkills } : {}),
         ...(typeof obj.description === "string" ? { description: obj.description } : {}),
     };
 };
@@ -218,6 +229,7 @@ const parseDeclarativeSkill = (raw, fallbackId, namespacedId) => {
         ...(isString(obj.label) ? { label: obj.label } : {}),
         ...("rules" in obj ? { rules: validateRules(obj.rules, `${fallbackId}.skill.json`) } : {}),
         ...("conversions" in obj ? { conversions: parseConversions(obj.conversions, `${fallbackId}.skill.json`) } : {}),
+        ...(typeof obj.globalHook === "boolean" ? { globalHook: obj.globalHook } : {}),
     };
 };
 const parseCodeSkill = (mod, fallbackId, namespacedId) => {
@@ -256,6 +268,16 @@ const parseCodeSkill = (mod, fallbackId, namespacedId) => {
         ...(typeof obj.play === "function" ? { play: obj.play } : {}),
         ...(typeof obj.handLimit === "function" ? { handLimit: obj.handLimit } : {}),
         ...(typeof obj.onTrigger === "object" && obj.onTrigger !== null ? { onTrigger: obj.onTrigger } : {}),
+        // 注意：parse 重建对象时必须逐字段复制——2026-11-12 漏抄这三项，致 Phase 8 三个接口
+        // （矢志门控/灭吴扣费/武库与挽危的 globalHook）在真实加载路径上全部静默失效，
+        // 而 conversions.test.ts 因绕开 loader 直接注册模块，始终没测出来。见 general-pack.test.ts 回归测试。
+        ...(typeof obj.canUseConversion === "function"
+            ? { canUseConversion: obj.canUseConversion }
+            : {}),
+        ...(typeof obj.onConversionUsed === "function"
+            ? { onConversionUsed: obj.onConversionUsed }
+            : {}),
+        ...(typeof obj.globalHook === "boolean" ? { globalHook: obj.globalHook } : {}),
     };
     return entry;
 };
@@ -264,7 +286,8 @@ const loadOnePack = async (dir, folderName, options) => {
     const meta = validateGeneralJson(JSON.parse(readFileSync(generalPath, "utf-8")), folderName);
     const skills = [];
     const namespacedSkills = [];
-    for (const declared of meta.skills) {
+    // 开局技能与潜在技能走同一条加载路径；区别只在是否进 `general.skills`（开局持有表）。
+    const loadSkill = async (declared) => {
         // 安全：技能名只允许字母、数字、下划线、连字符与中文，杜绝 `../../evil` 类路径穿越。
         if (!/^[\w\u4e00-\u9fa5-]+$/u.test(declared)) {
             throw new Error(`技能名非法（只允许字母、数字、下划线、连字符与中文）：${folderName}/${declared}`);
@@ -279,20 +302,26 @@ const loadOnePack = async (dir, folderName, options) => {
             throw new Error(`技能文件缺失：${folderName}/${declared}.skill.{json,ts,mjs}`);
         }
         const namespacedId = `${folderName}/${declared}`;
-        let module;
         if (hasJson) {
-            module = parseDeclarativeSkill(JSON.parse(readFileSync(jsonPath, "utf-8")), declared, namespacedId);
+            return parseDeclarativeSkill(JSON.parse(readFileSync(jsonPath, "utf-8")), declared, namespacedId);
         }
-        else {
-            if (options.jsonOnly) {
-                throw new Error(`${folderName}/${declared} 是代码技能，但启用了 --generals-json-only`);
-            }
-            const codePath = existsSync(tsPath) ? tsPath : mjsPath;
-            const imported = await import(pathToFileURL(resolve(codePath)).href);
-            module = parseCodeSkill(imported, declared, namespacedId);
+        if (options.jsonOnly) {
+            throw new Error(`${folderName}/${declared} 是代码技能，但启用了 --generals-json-only`);
         }
+        const codePath = existsSync(tsPath) ? tsPath : mjsPath;
+        const imported = await import(pathToFileURL(resolve(codePath)).href);
+        return parseCodeSkill(imported, declared, namespacedId);
+    };
+    for (const declared of meta.skills) {
+        const module = await loadSkill(declared);
         skills.push({ ...module, generalName: meta.name });
-        namespacedSkills.push(namespacedId);
+        namespacedSkills.push(module.id);
+    }
+    const namespacedLatentSkills = [];
+    for (const declared of meta.latentSkills ?? []) {
+        const module = await loadSkill(declared);
+        skills.push({ ...module, generalName: meta.name });
+        namespacedLatentSkills.push(module.id);
     }
     return {
         general: {
@@ -301,6 +330,7 @@ const loadOnePack = async (dir, folderName, options) => {
             gender: meta.gender,
             maxHp: meta.maxHp,
             skills: namespacedSkills,
+            ...(namespacedLatentSkills.length > 0 ? { latentSkills: namespacedLatentSkills } : {}),
             ...(meta.description !== undefined ? { description: meta.description } : {}),
         },
         skills,

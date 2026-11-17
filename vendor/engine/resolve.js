@@ -44,7 +44,7 @@ export function resolveSlash(ctx, attacker, target, fromSerpent = false, kind = 
                 if (discardDecision.choice === "card") {
                     const discarded = await ctx.removeUsableCardBySourceId(target, discardDecision.sourceId);
                     if (discarded) {
-                        ctx.discardPile.push(discarded);
+                        await ctx.discardCards([discarded], target, "弃置", logs);
                         const redirectDecision = await ctx.decide({
                             kind: "collateral",
                             requestId: ctx.nextInteractionId(),
@@ -91,8 +91,8 @@ export function resolveSlash(ctx, attacker, target, fromSerpent = false, kind = 
                 if (decision.choice === "card") {
                     const removed = await ctx.removeUsableCardBySourceId(target, decision.sourceId);
                     if (removed) {
-                        ctx.discardPile.push(removed);
                         logs.push(`${attacker.name} 的雌雄双股剑生效，${target.name} 弃置了 ${removed.type}`);
+                        await ctx.discardCards([removed], target, "弃置", logs);
                     }
                 }
                 else {
@@ -489,8 +489,8 @@ export function resolveFireAttack(ctx, user, target, usedCard) {
         if (!discarded) {
             return logs;
         }
-        ctx.discardPile.push(discarded);
         logs.push(`${user.name} 弃置 ${discarded.type}，${CardType.FireAttack}生效`);
+        await ctx.discardCards([discarded], user, "弃置", logs);
         await ctx.applyDamage(user, target, 1, CardType.FireAttack, logs, usedCard);
         return logs;
     })();
@@ -686,7 +686,7 @@ export function resolveEquip(ctx, user, equipType) {
         if (previous !== null) {
             ctx.discardPile.push(createCard(ctx, previous, `replace-${ctx.turn}`));
             logs.push(`${user.name} 的旧宝物 ${previous} 被替换并弃置`);
-            discardWoodenOxStoredCards(ctx, user, logs);
+            await discardWoodenOxStoredCards(ctx, user, logs);
             logs.push(...(await onLoseEquip(ctx, user, previous)));
         }
         logs.push(`${user.name} 装备了${equipType}`);
@@ -698,52 +698,63 @@ export function resolveDeaths(ctx) {
         if (ctx.deferDyingResolution)
             return [];
         const logs = [];
-        for (const player of ctx.players) {
-            if (!player.alive) {
-                continue;
-            }
-            if (player.hp > 0) {
-                continue;
-            }
-            // 濒死：每张桃只回复 1 点体力，必须回到 1 点以上才算脱离濒死，
-            // 因此欠 N 点就要 N+1 张桃（hp=-2 需要 3 张）。
-            // 先由濒死者本人自救（酒可当桃自救），可连续使用多张；
-            // 再由其他存活角色按座次顺序逐一救援，每人也可连续使用多张，
-            // 直到体力 > 0 或无人再出桃，未脱离则阵亡。
-            while (player.hp <= 0 && (await ctx.consumePeachResponse(player, player.id, logs))) {
-                player.hp = Math.min(player.maxHp, player.hp + 1);
-                logs.push(`${player.name} 自救，体力恢复到 ${player.hp}`);
-            }
-            if (player.hp <= 0) {
-                for (const rescuer of getRescuersInOrder(ctx, player)) {
-                    while (player.hp <= 0 && (await ctx.consumePeachResponse(rescuer, player.id, logs))) {
-                        let recovered = 1;
-                        const peachSaveBonus = player.role === PlayerRole.Lord ? getSkillRules(player).peachSaveBonus : 0;
-                        if (peachSaveBonus > 0 && getPlayerKingdom(ctx, rescuer) === KINGDOM.Wu) {
-                            recovered += peachSaveBonus;
-                            logs.push(`${player.name} 的${SkillName.JiuYuan}生效，额外回复 ${peachSaveBonus} 点体力`);
+        // Phase 9：外层重扫——濒死钩子可能让已扫过的玩家掉到 0 体力（如挽危救人后自损），
+        // 单遍遍历会漏掉他们。每遍都把遇到的濒死者结算干净（救活或阵亡），因此只有钩子
+        // 新造出的濒死者会进入下一遍；上限 10 遍防失控。
+        for (let pass = 0; pass < 10; pass += 1) {
+            for (const player of ctx.players) {
+                if (!player.alive) {
+                    continue;
+                }
+                if (player.hp > 0) {
+                    continue;
+                }
+                // Phase 9：濒死触发点（桃救援之前发出；钩子可直接回血救人，体力回到 1 点以上后
+                // 下面的救援循环自动跳过）。
+                await ctx.emitSkillTrigger("dying", { actor: player, reason: "濒死" }, logs);
+                // 濒死：每张桃只回复 1 点体力，必须回到 1 点以上才算脱离濒死，
+                // 因此欠 N 点就要 N+1 张桃（hp=-2 需要 3 张）。
+                // 先由濒死者本人自救（酒可当桃自救），可连续使用多张；
+                // 再由其他存活角色按座次顺序逐一救援，每人也可连续使用多张，
+                // 直到体力 > 0 或无人再出桃，未脱离则阵亡。
+                while (player.hp <= 0 && (await ctx.consumePeachResponse(player, player.id, logs))) {
+                    player.hp = Math.min(player.maxHp, player.hp + 1);
+                    logs.push(`${player.name} 自救，体力恢复到 ${player.hp}`);
+                }
+                if (player.hp <= 0) {
+                    for (const rescuer of getRescuersInOrder(ctx, player)) {
+                        while (player.hp <= 0 && (await ctx.consumePeachResponse(rescuer, player.id, logs))) {
+                            let recovered = 1;
+                            const peachSaveBonus = player.role === PlayerRole.Lord ? getSkillRules(player).peachSaveBonus : 0;
+                            if (peachSaveBonus > 0 && getPlayerKingdom(ctx, rescuer) === KINGDOM.Wu) {
+                                recovered += peachSaveBonus;
+                                logs.push(`${player.name} 的${SkillName.JiuYuan}生效，额外回复 ${peachSaveBonus} 点体力`);
+                            }
+                            // 拦截点 peach_save：每消耗一张救援桃发出；钩子可累加 peachSaveBonus 追加回复。
+                            const rescuePayload = { actor: player, source: rescuer, reason: "濒死救援" };
+                            await ctx.emitSkillTrigger("peach_save", rescuePayload, logs);
+                            const extra = Math.max(0, rescuePayload.peachSaveBonus ?? 0);
+                            if (extra > 0) {
+                                recovered += extra;
+                                logs.push(`${player.name} 的救援技能生效，额外回复 ${extra} 点体力`);
+                            }
+                            player.hp = Math.min(player.maxHp, player.hp + recovered);
+                            logs.push(`${rescuer.name} 对${player.name}使用${CardType.Peach}，其体力恢复到 ${player.hp}`);
                         }
-                        // 拦截点 peach_save：每消耗一张救援桃发出；钩子可累加 peachSaveBonus 追加回复。
-                        const rescuePayload = { actor: player, source: rescuer, reason: "濒死救援" };
-                        await ctx.emitSkillTrigger("peach_save", rescuePayload, logs);
-                        const extra = Math.max(0, rescuePayload.peachSaveBonus ?? 0);
-                        if (extra > 0) {
-                            recovered += extra;
-                            logs.push(`${player.name} 的救援技能生效，额外回复 ${extra} 点体力`);
+                        if (player.hp > 0) {
+                            break;
                         }
-                        player.hp = Math.min(player.maxHp, player.hp + recovered);
-                        logs.push(`${rescuer.name} 对${player.name}使用${CardType.Peach}，其体力恢复到 ${player.hp}`);
-                    }
-                    if (player.hp > 0) {
-                        break;
                     }
                 }
+                if (player.hp <= 0) {
+                    player.alive = false;
+                    player.delayedTricks = [];
+                    logs.push(`${player.name} 阵亡，身份：${player.role}`);
+                    logs.push(...(await resolveKillReward(ctx, player)));
+                }
             }
-            if (player.hp <= 0) {
-                player.alive = false;
-                player.delayedTricks = [];
-                logs.push(`${player.name} 阵亡，身份：${player.role}`);
-                logs.push(...resolveKillReward(ctx, player));
+            if (!ctx.players.some((p) => p.alive && p.hp <= 0)) {
+                break;
             }
         }
         return logs;
@@ -757,7 +768,7 @@ export function resolveDeaths(ctx) {
  *
  * 已知简化：主公受罚弃置装备时不触发枭姬/白银狮子等"失去装备"技能，只做弃置。
  */
-export function resolveKillReward(ctx, victim) {
+export async function resolveKillReward(ctx, victim) {
     const killerId = ctx.takeDamageSource(victim.id);
     if (killerId === null) {
         return [];
@@ -775,7 +786,8 @@ export function resolveKillReward(ctx, victim) {
     }
     const logs = [];
     const handCount = killer.hand.length;
-    ctx.discardPile.push(...killer.hand);
+    const discardLogs = [];
+    await ctx.discardCards([...killer.hand], killer, "弃置", discardLogs);
     killer.hand = [];
     const equips = [];
     if (killer.weapon !== null)
@@ -796,8 +808,8 @@ export function resolveKillReward(ctx, victim) {
     killer.defenseHorse = null;
     killer.attackHorse = null;
     killer.treasure = null;
-    discardWoodenOxStoredCards(ctx, killer, logs);
-    logs.push(`${killer.name} 作为${PlayerRole.Lord}杀死${PlayerRole.Loyalist}${victim.name}，弃置全部 ${handCount} 张手牌与 ${equips.length} 件装备`);
+    await discardWoodenOxStoredCards(ctx, killer, logs);
+    logs.push(`${killer.name} 作为${PlayerRole.Lord}杀死${PlayerRole.Loyalist}${victim.name}，弃置全部 ${handCount} 张手牌与 ${equips.length} 件装备`, ...discardLogs);
     return logs;
 }
 export function getPlayerKingdom(ctx, player) {
@@ -1088,14 +1100,15 @@ export function onLoseEquip(ctx, player, equip) {
  * 木牛流马离开装备区（被弃置/被获得/被替换）时，其内存的牌必须一并置入弃牌堆，
  * 否则这些牌会从对局中凭空消失。
  */
-export function discardWoodenOxStoredCards(ctx, player, logs) {
+export async function discardWoodenOxStoredCards(ctx, player, logs) {
     if (player.treasureCards.length === 0) {
         return;
     }
     const stored = player.treasureCards.length;
-    ctx.discardPile.push(...player.treasureCards);
+    const discardLogs = [];
+    await ctx.discardCards([...player.treasureCards], player, "弃置", discardLogs);
     player.treasureCards = [];
-    logs.push(`${player.name} 的${CardType.WoodenOx}内存的 ${stored} 张牌置入弃牌堆`);
+    logs.push(`${player.name} 的${CardType.WoodenOx}内存的 ${stored} 张牌置入弃牌堆`, ...discardLogs);
 }
 export function createCard(ctx, type, seed) {
     return { id: `${type}-${seed}-${ctx.turn}`, type, color: "colorless", suit: "none", rank: 0 };
@@ -1184,8 +1197,9 @@ export function removeSelectedCardFromPlayer(ctx, player, mode, selectedCardId, 
                 receiver.hand.push(removed);
                 return [...extraLogs, `${receiver.name} 获得了 ${player.name} 的 1 张手牌`];
             }
-            ctx.discardPile.push(removed);
-            return [...extraLogs, `${player.name} 的 1 张手牌被弃置`];
+            const discardLogs = [];
+            await ctx.discardCards([removed], player, "弃置", discardLogs);
+            return [...extraLogs, `${player.name} 的 1 张手牌被弃置`, ...discardLogs];
         }
         if (selectedCardId.startsWith("hand:")) {
             const handCardId = selectedCardId.slice(5);
@@ -1203,8 +1217,9 @@ export function removeSelectedCardFromPlayer(ctx, player, mode, selectedCardId, 
                 // 从手牌获得时不公开牌型（与其他玩家视角的盲选一致），获得者自己能在手牌中看到
                 return [...extraLogs, `${receiver.name} 获得了 ${player.name} 的 1 张手牌`];
             }
-            ctx.discardPile.push(removed);
-            return [...extraLogs, `${player.name} 的手牌 ${removed.type} 被弃置`];
+            const discardLogs = [];
+            await ctx.discardCards([removed], player, "弃置", discardLogs);
+            return [...extraLogs, `${player.name} 的手牌 ${removed.type} 被弃置`, ...discardLogs];
         }
         if (selectedCardId === "weapon") {
             const removedWeapon = player.weapon;
@@ -1291,7 +1306,7 @@ export function removeSelectedCardFromPlayer(ctx, player, mode, selectedCardId, 
             ctx.discardPile.push(createCard(ctx, removedTreasure, `discard-${ctx.turn}`));
             treasureLogs.push(`${player.name} 的装备 ${removedTreasure} 被弃置`);
         }
-        discardWoodenOxStoredCards(ctx, player, treasureLogs);
+        await discardWoodenOxStoredCards(ctx, player, treasureLogs);
         return [...treasureLogs, ...(await onLoseEquip(ctx, player, removedTreasure))];
     })();
 }

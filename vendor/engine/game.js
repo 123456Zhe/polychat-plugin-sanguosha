@@ -4,10 +4,10 @@ import { pickBestAiAction, pickBestTarget, } from "./ai-heuristics.js";
 import { buildRoleList, getAiName, getRoleDistribution, GENERAL_LIBRARY, pickRandomUnusedGeneral, resolveGeneralByName, } from "./generals.js";
 import { canReachForDistanceOneTrick as canReachForDistanceOneTrickImpl, canReachForSlash as canReachForSlashImpl, createCard as createCardImpl, discardSelfCards as discardSelfCardsImpl, discardWoodenOxStoredCards as discardWoodenOxStoredCardsImpl, expandSlashTargets as expandSlashTargetsImpl, onLoseEquip as onLoseEquipImpl, removeRandomCardFromPlayer as removeRandomCardFromPlayerImpl, resolveArrowRain as resolveArrowRainImpl, resolveBarbarian as resolveBarbarianImpl, resolveCollateral as resolveCollateralImpl, resolveDeaths as resolveDeathsImpl, resolveDelayedJudgments as resolveDelayedJudgmentsImpl, resolveDelayedTrick as resolveDelayedTrickImpl, resolveDismantle as resolveDismantleImpl, resolveDuel as resolveDuelImpl, resolveEquip as resolveEquipImpl, resolveFireAttack as resolveFireAttackImpl, resolveHarvest as resolveHarvestImpl, resolveIronChain as resolveIronChainImpl, resolvePeachGarden as resolvePeachGardenImpl, resolveSingleDelayedJudgment as resolveSingleDelayedJudgmentImpl, resolveSlash as resolveSlashImpl, resolveSnatch as resolveSnatchImpl, resolveWinner as resolveWinnerImpl, tryNegateGlobal as tryNegateGlobalImpl, } from "./resolve.js";
 import { createSkillHooks } from "./skill-hooks.js";
-import { getPackSkills } from "./skill-module.js";
+import { getPackSkill, getPackSkills } from "./skill-module.js";
 import { resolveSkillDescriptor } from "./skill-registry.js";
 import { findSkillWithBooleanRule, getHandLimit, getSkillRules, isImmuneTo } from "./skill-rules.js";
-import { canPlaySlashInTurn as canPlaySlashInTurnImpl, canUseAssault as canUseAssaultImpl, canUseFanJian as canUseFanJianImpl, canUseJieYin as canUseJieYinImpl, canUseKuRou as canUseKuRouImpl, canUseLiJian as canUseLiJianImpl, canUseQingNang as canUseQingNangImpl, canUseRenDe as canUseRenDeImpl, canUseZhiBa as canUseZhiBaImpl, canUseZhiHeng as canUseZhiHengImpl, getLordWithZhiBa as getLordWithZhiBaImpl, hasSkill as playerHasSkill, isSkillUsed as playerIsSkillUsed, markSkillUsed as playerMarkSkillUsed, resetTurnSkillState as playerResetTurnSkillState, shouldActivateOptionalEffect as playerShouldActivateOptionalEffect, useSkillAction as useSkillActionImpl, } from "./skills.js";
+import { canPlaySlashInTurn as canPlaySlashInTurnImpl, canUseAssault as canUseAssaultImpl, canUseFanJian as canUseFanJianImpl, canUseJieYin as canUseJieYinImpl, canUseKuRou as canUseKuRouImpl, canUseLiJian as canUseLiJianImpl, canUseQingNang as canUseQingNangImpl, canUseRenDe as canUseRenDeImpl, canUseZhiBa as canUseZhiBaImpl, canUseZhiHeng as canUseZhiHengImpl, getLordWithZhiBa as getLordWithZhiBaImpl, hasSkill as playerHasSkill, isSkillUsed as playerIsSkillUsed, isSkillUsedThisRound as playerIsSkillUsedThisRound, markSkillUsed as playerMarkSkillUsed, markSkillUsedThisRound as playerMarkSkillUsedThisRound, resetTurnSkillState as playerResetTurnSkillState, shouldActivateOptionalEffect as playerShouldActivateOptionalEffect, useSkillAction as useSkillActionImpl, } from "./skills.js";
 import { PlayerRole, SkillName, TurnPhase, } from "./types.js";
 export { TurnPhase, SkillName, PlayerRole } from "./types.js";
 export { GENERAL_LIBRARY } from "./generals.js";
@@ -26,6 +26,10 @@ export class SanGuoGame {
     discardPile;
     currentPlayerIndex;
     turn;
+    /** Phase 9：当前轮次（从 1 开始；一轮 = 从起始座位到回到该座位之前的所有回合）。 */
+    round;
+    /** Phase 9：本轮起始座位的下标（轮次回到该座位时 round +1；起始玩家阵亡则锚点顺延到下一位存活者）。 */
+    roundStartIndex;
     phase;
     slashUsedThisTurn;
     /** 本回合是否"打出"过杀（响应决斗/南蛮等），与 `slashUsedThisTurn`（使用）分开计数。 */
@@ -37,6 +41,8 @@ export class SanGuoGame {
     winner;
     rng;
     skillUsedThisTurn;
+    /** Phase 9：本轮已用过的技能（轮次推进时清空）。 */
+    skillUsedThisRound;
     skillCountsThisTurn;
     skillFlagsThisTurn;
     skillHooks;
@@ -74,6 +80,8 @@ export class SanGuoGame {
         this.discardPile = [];
         this.currentPlayerIndex = 0;
         this.turn = 1;
+        this.round = 1;
+        this.roundStartIndex = 0;
         this.phase = TurnPhase.Draw;
         this.slashUsedThisTurn = false;
         this.slashPlayedThisTurn = false;
@@ -81,6 +89,7 @@ export class SanGuoGame {
         this.wineUsedPlayerIds = new Set();
         this.winner = null;
         this.skillUsedThisTurn = new Map();
+        this.skillUsedThisRound = new Map();
         this.skillCountsThisTurn = new Map();
         this.skillFlagsThisTurn = new Map();
         this.skillHooks = createSkillHooks(this);
@@ -124,6 +133,8 @@ export class SanGuoGame {
             this.currentPlayerIndex = 0;
         }
         this.turn = 1;
+        this.round = 1;
+        this.roundStartIndex = this.currentPlayerIndex;
         this.phase = TurnPhase.Draw;
         this.winner = null;
         this.slashUsedThisTurn = false;
@@ -131,6 +142,7 @@ export class SanGuoGame {
         this.wineBuffPlayerIds = new Set();
         this.wineUsedPlayerIds = new Set();
         this.skillUsedThisTurn = new Map();
+        this.skillUsedThisRound = new Map();
         this.skillCountsThisTurn = new Map();
         this.skillFlagsThisTurn = new Map();
         this.responsePolicyByPlayer.clear();
@@ -185,6 +197,8 @@ export class SanGuoGame {
         this.currentPlayerIndex = this.players.findIndex((player) => player.role === PlayerRole.Lord);
         this.currentPlayerIndex = Math.max(0, this.currentPlayerIndex);
         this.turn = 1;
+        this.round = 1;
+        this.roundStartIndex = this.currentPlayerIndex;
         this.phase = TurnPhase.Draw;
         this.winner = null;
         this.slashUsedThisTurn = false;
@@ -192,6 +206,7 @@ export class SanGuoGame {
         this.wineBuffPlayerIds = new Set();
         this.wineUsedPlayerIds = new Set();
         this.skillUsedThisTurn = new Map();
+        this.skillUsedThisRound = new Map();
         this.skillCountsThisTurn = new Map();
         this.skillFlagsThisTurn = new Map();
         this.responsePolicyByPlayer.clear();
@@ -584,11 +599,36 @@ export class SanGuoGame {
      *
      * 约定 `cardIndex = -10000 - 手牌下标`（避开内置已占用的 -100/-200/-400/-500/-1000 与 -1/-11/-12/-13），
      * 并用 `convertVia`/`convertTo` 标明"通过哪个技能、当成哪张牌"，`playAction` 据此复算，不信任客户端。
-     * 只枚举引擎结算得了的牌类：杀/火杀/雷杀（需要目标）与桃（自己体力未满）。
+     * 枚举引擎结算得了的牌类：杀/火杀/雷杀（需要目标）、桃（自己体力未满）、酒与普通锦囊
+     * （Phase 8；需要目标的按牌类枚举，无目标的不设目标）。
      * 闪/无懈可击是响应牌，不进可玩动作列表（走 `provide_response`）。
      */
+    /**
+     * Phase 8：一条当牌转换当前是否可用。酒每回合限一次（与可玩动作列表同口径）；
+     * 代码技能的 `canUseConversion` 门控（"每回合限次/消耗标记"类限制）在枚举与结算时各复算一次。
+     * 必须纯（只读），枚举与结算都调它。
+     */
+    canUseConversionNow(player, skillId, conversion) {
+        if (conversion.to === CardType.Wine && this.wineUsedPlayerIds.has(player.id)) {
+            return false;
+        }
+        const module = getPackSkill(skillId);
+        if (module?.canUseConversion && !module.canUseConversion(this, player, conversion)) {
+            return false;
+        }
+        return true;
+    }
+    /** Phase 8：转换成功结算后通知技能扣费（只在成功时调用一次）。 */
+    async notifyConversionUsed(player, skillId, conversion, logs) {
+        const module = getPackSkill(skillId);
+        await module?.onConversionUsed?.(this, player, conversion, logs);
+    }
     appendConversionActions(player, actions, canPlaySlash) {
         for (const { skillId, conversion } of this.playerConversions(player)) {
+            // Phase 8：门控（限次/标记）不过的转换不枚举。
+            if (!this.canUseConversionNow(player, skillId, conversion)) {
+                continue;
+            }
             const isSlashLike = this.isSlashCard(conversion.to);
             if (isSlashLike && !canPlaySlash) {
                 continue;
@@ -596,12 +636,16 @@ export class SanGuoGame {
             if (conversion.to === CardType.Peach && player.hp >= player.maxHp) {
                 continue;
             }
-            if (!isSlashLike && conversion.to !== CardType.Peach) {
+            // Phase 8：闪/无懈可击只能响应（走 provide_response），不能主动使用。
+            if (conversion.to === CardType.Dodge || conversion.to === CardType.Negate) {
                 continue;
             }
             const displayName = resolveSkillDescriptor(skillId).displayName ?? skillId;
-            const targets = isSlashLike ? this.findTargetsByCard(player.id, conversion.to) : [];
-            if (isSlashLike && targets.length === 0) {
+            // Phase 8：酒与普通锦囊也可当——需要目标的按牌类枚举目标（决斗/拆/顺/借刀/火攻/铁索），
+            // 不需要目标的（无中生有/五谷丰登/桃园结义/万箭齐发/南蛮入侵/酒）不设目标。
+            const needsTarget = isSlashLike || this.cardNeedsTarget(conversion.to);
+            const targets = needsTarget ? this.findTargetsByCard(player.id, conversion.to) : [];
+            if (needsTarget && targets.length === 0) {
                 continue;
             }
             player.hand.forEach((card, cardIndex) => {
@@ -611,8 +655,8 @@ export class SanGuoGame {
                 actions.push({
                     type: "play",
                     cardIndex: -10000 - cardIndex,
-                    label: `发动${displayName}：将${describeCard(card)}当${conversion.to}${isSlashLike ? "使用" : "对自己使用"}`,
-                    requiresTarget: isSlashLike,
+                    label: `发动${displayName}：将${describeCard(card)}当${conversion.to}${conversion.to === CardType.Peach ? "对自己使用" : "使用"}`,
+                    requiresTarget: needsTarget,
                     targets,
                     convertVia: skillId,
                     convertTo: conversion.to,
@@ -632,7 +676,34 @@ export class SanGuoGame {
     }
     /** 该玩家能否用某种转换作为 `kind` 响应打出（`asResponse` 命中且源牌匹配）。 */
     responseConversions(player, kind) {
-        return this.playerConversions(player).filter((entry) => (entry.conversion.asResponse ?? []).includes(kind) && responseKindToCardType(kind) === entry.conversion.to);
+        return this.playerConversions(player).filter((entry) => (entry.conversion.asResponse ?? []).includes(kind) &&
+            responseKindToCardType(kind) === entry.conversion.to &&
+            // Phase 8：门控（限次/标记）不过的转换既不提供来源、也不被验证接受。
+            this.canUseConversionNow(player, entry.skillId, entry.conversion));
+    }
+    /**
+     * Phase 8：当牌转换（酒/普通锦囊）的目标合法性复算，与 `playAction` 的手牌使用前检查同口径：
+     * 需要目标的牌必须给目标、铁索连环以外不能指定自己、决斗受空城保护、
+     * 距离 1 锦囊（顺手牵羊）看距离。杀走原有分支，这里不管。
+     */
+    validateConversionTarget(player, convertTo, targetId) {
+        if (!this.cardNeedsTarget(convertTo)) {
+            return null;
+        }
+        if (!targetId) {
+            return "需要选择目标";
+        }
+        const target = this.mustGetPlayer(targetId);
+        if (!target.alive || (target.id === player.id && convertTo !== CardType.IronChain)) {
+            return "目标无效";
+        }
+        if (convertTo === CardType.Duel && this.isKongChengProtected(target, convertTo)) {
+            return `${target.name} 的${SkillName.KongCheng}生效，无法成为目标`;
+        }
+        if (isDistanceOneTrickCard(convertTo) && !this.canReachForDistanceOneTrick(player, target)) {
+            return `目标超出距离，${convertTo}只能对距离 1 以内的角色使用`;
+        }
+        return null;
     }
     /**
      * 当牌转换在**出牌阶段**的结算（`playAction` 的 `cardIndex <= -10000` 分支）。
@@ -652,9 +723,28 @@ export class SanGuoGame {
             return ["使用卡牌失败"];
         }
         const displayName = resolveSkillDescriptor(viaSkillId).displayName ?? viaSkillId;
+        // Phase 8：门控复算（不信任客户端；枚举时已算过一次，这里防过期快照/伪造）。
+        if (!this.canUseConversionNow(player, viaSkillId, conversion)) {
+            return [`${player.name} 当前无法发动${displayName}的当牌转换`];
+        }
         const isSlashLike = this.isSlashCard(conversion.to);
         if (!isSlashLike && conversion.to !== CardType.Peach) {
-            return [`${conversion.to}不能这样使用`];
+            // Phase 8：酒与普通锦囊——造一张"源牌花色/点数 + 目标牌类"的合成牌，走通用结算
+            // `resolveUsedCard`（决斗/拆/顺/无中生有/借刀/火攻/铁索/桃园/五谷/万箭/南蛮/酒都在其中）。
+            // 杀/桃仍走原有分支，避免既有转换的行为变化。合成牌沿用源牌 id 进弃牌堆（源牌本身不再另行入堆）。
+            const targetError = this.validateConversionTarget(player, conversion.to, targetId);
+            if (targetError) {
+                return [targetError];
+            }
+            const used = await this.removeHandCardAt(player, handIndex);
+            if (!used) {
+                return ["使用卡牌失败"];
+            }
+            const synthetic = { id: used.id, type: conversion.to, color: used.color, suit: used.suit, rank: used.rank };
+            const logs = [`${player.name} 发动${displayName}，将${describeCard(used)}当${conversion.to}使用`];
+            logs.push(...(await this.resolveUsedCard(player, synthetic, targetId, false)));
+            await this.notifyConversionUsed(player, viaSkillId, conversion, logs);
+            return logs;
         }
         if (conversion.to === CardType.Peach && player.hp >= player.maxHp) {
             return [`${player.name} 当前体力已满`];
@@ -687,6 +777,7 @@ export class SanGuoGame {
                 this.slashUsedThisTurn = true;
             }
             logs.push(...(await this.useSlash(player, target, { kind: slashKindOf(player, conversion.to), card: used })));
+            await this.notifyConversionUsed(player, viaSkillId, conversion, logs);
             return logs;
         }
         player.hp = Math.min(player.maxHp, player.hp + 1);
@@ -694,6 +785,7 @@ export class SanGuoGame {
         logs.push(...(await this.resolveDeaths()));
         logs.push(...this.resolveWinner());
         await this.advanceIfCurrentPlayerDead(logs);
+        await this.notifyConversionUsed(player, viaSkillId, conversion, logs);
         return logs;
     }
     getPendingDiscardCount(playerId) {
@@ -788,8 +880,8 @@ export class SanGuoGame {
         if (!removed) {
             return ["弃牌选择无效"];
         }
-        this.discardPile.push(removed);
         const logs = [`${player.name} 弃置了 ${removed.type}`];
+        await this.discardCards([removed], player, "弃置", logs);
         if (player.hand.length > getHandLimit(player)) {
             return logs;
         }
@@ -893,9 +985,10 @@ export class SanGuoGame {
             if (!removed) {
                 return ["使用卡牌失败"];
             }
-            this.discardPile.push(removed);
+            const discardLogs = [];
+            await this.discardCards([removed], player, "弃置", discardLogs);
             const drawn = this.drawCards(player.id, 1);
-            const logs = [`${player.name} 重铸${CardType.IronChain}，摸了 ${drawn} 张牌`];
+            const logs = [`${player.name} 重铸${CardType.IronChain}，摸了 ${drawn} 张牌`, ...discardLogs];
             logs.push(...(await this.resolveDeaths()));
             logs.push(...this.resolveWinner());
             await this.advanceIfCurrentPlayerDead(logs);
@@ -1012,13 +1105,14 @@ export class SanGuoGame {
             if (!first || !second) {
                 return [`${player.name} 手牌不足，无法发动丈八蛇矛`];
             }
-            this.discardPile.push(first);
-            this.discardPile.push(second);
+            const discardLogs = [];
+            await this.discardCards([first, second], player, "弃置", discardLogs);
             if (!getSkillRules(player).slashLimitExempt) {
                 this.slashUsedThisTurn = true;
             }
             const logs = [
                 `${player.name} 发动丈八蛇矛，弃置 ${first.type}、${second.type} 视为使用杀`,
+                ...discardLogs,
                 ...(await this.resolveSlash(player, target, true, slashKindOf(player, undefined))),
             ];
             return logs;
@@ -1077,7 +1171,18 @@ export class SanGuoGame {
         this.discardPile.push(usedCard);
         const logs = [];
         // 拦截点 card_used：使用一张牌时（结算前）通知，reason="使用"。
-        await this.emitSkillTrigger("card_used", { actor: player, card: usedCard, reason: "使用" }, logs);
+        // targets 按"指定目标"口径填入：有 targetId 的牌取该角色（杀的丈八蛇矛追加目标在结算时展开，不在此列）；
+        // 全体锦囊按实际影响范围展开；无目标的牌（无中生有/桃/酒/装备）为空数组。
+        const usedTargets = targetId
+            ? [this.mustGetPlayer(targetId)]
+            : usedCard.type === CardType.Barbarian || usedCard.type === CardType.ArrowRain
+                ? this.players.filter((p) => p.alive && p.id !== player.id)
+                : usedCard.type === CardType.PeachGarden || usedCard.type === CardType.Harvest
+                    ? this.players.filter((p) => p.alive)
+                    : usedCard.type === CardType.Lightning
+                        ? [player]
+                        : [];
+        await this.emitSkillTrigger("card_used", { actor: player, card: usedCard, reason: "使用", targets: usedTargets }, logs);
         if (fromTreasure) {
             logs.push(`${player.name} 从${CardType.WoodenOx}下使用了 ${usedCard.type}`);
         }
@@ -1380,7 +1485,7 @@ export class SanGuoGame {
                 }
                 this.discardPile.push(createCardImpl(this, removed, `discard-${this.turn}`));
                 if (removed === CardType.WoodenOx) {
-                    discardWoodenOxStoredCardsImpl(this, player, logs);
+                    await discardWoodenOxStoredCardsImpl(this, player, logs);
                 }
                 logs.push(`${player.name} 弃置装备 ${removed}`);
                 // 弃置装备同样属于"失去装备"，枭姬/白银狮子等技能应正常触发。
@@ -1392,8 +1497,8 @@ export class SanGuoGame {
             if (!card) {
                 break;
             }
-            this.discardPile.push(card);
             logs.push(`${player.name} 弃置 ${card.type}`);
+            await this.discardCards([card], player, "弃置", logs);
             discarded += 1;
         }
         return discarded;
@@ -1584,12 +1689,14 @@ export class SanGuoGame {
                 : kind === "negate"
                     ? card.type === CardType.Negate
                     : card.type === CardType.Peach || wineAsPeach;
+        // Phase 8：本次响应若走了当牌转换，成功后要通知技能扣费（限次/标记）。
+        let viaConversion;
         if (!direct) {
             // 声明式 conversions（`viaSkill` 凭据）与内置转换技各自的"当 X"判定。
             // 凭据只在来源列表里（`peekUsableCard` 只回 {card}），所以这里按 sourceId 回查一次候选来源；
             // 再以技能的真实声明复算 `from`，让伪造的 sourceId 无法蒙过去。
             const candidate = this.buildResponseSources(player, kind, kind === "peach" && player.hp <= 0).find((entry) => entry.sourceId === sourceId && entry.viaSkill);
-            const viaConversion = candidate
+            viaConversion = candidate
                 ? this.responseConversions(player, kind).find((entry) => entry.skillId === candidate.viaSkill && matchesConversionFilter(card, entry.conversion.from))
                 : undefined;
             const convertedLabel = viaConversion
@@ -1621,6 +1728,9 @@ export class SanGuoGame {
         }
         // 拦截点 card_used：打出一张响应牌（reason="打出"）。
         await this.emitSkillTrigger("card_used", { actor: player, card: removed, reason: "打出" }, logs);
+        if (viaConversion) {
+            await this.notifyConversionUsed(player, viaConversion.skillId, viaConversion.conversion, logs);
+        }
         if (wineAsPeach) {
             logs.push(`${player.name} 使用酒自救（当${CardType.Peach}）`);
         }
@@ -1893,7 +2003,10 @@ export class SanGuoGame {
         this.wineBuffPlayerIds = new Set();
         this.wineUsedPlayerIds = new Set();
         const player = this.currentPlayer;
-        const logs = [`第 ${this.turn} 回合：${player.name} 的回合`, `进入${TurnPhase.Judgment}`];
+        const logs = [`第 ${this.turn} 回合：${player.name} 的回合`];
+        // Phase 8：准备阶段触发点（官方回合流程的第一阶段，在判定阶段之前）。
+        await this.emitSkillTrigger("prepare_phase_start", { actor: player }, logs);
+        logs.push(`进入${TurnPhase.Judgment}`);
         if (player.delayedTricks.length > 0) {
             logs.push(...(await this.resolveDelayedJudgments(player)));
         }
@@ -1968,8 +2081,8 @@ export class SanGuoGame {
                 const index = this.randomIndex(player.hand.length);
                 const removed = await this.removeHandCardAt(player, index);
                 if (removed) {
-                    this.discardPile.push(removed);
                     logs.push(`${player.name} 弃置了 ${removed.type}`);
+                    await this.discardCards([removed], player, "弃置", logs);
                 }
             }
         }
@@ -2010,6 +2123,8 @@ export class SanGuoGame {
         const logs = [];
         this.phase = TurnPhase.End;
         logs.push(`进入${TurnPhase.End}`);
+        // Phase 8：结束阶段触发点（弃牌阶段之后、回合结束之前；闭月/据守等内置结束阶段效果之前发出）。
+        await this.emitSkillTrigger("end_phase_start", { actor: player }, logs);
         if (this.hasSkill(player, SkillName.BiYue) && await this.shouldActivateOptionalEffect(player, SkillName.BiYue)) {
             const drawn = this.drawCards(player.id, 1);
             logs.push(`${player.name} 的${SkillName.BiYue}生效，摸了 ${drawn} 张牌`);
@@ -2112,6 +2227,19 @@ export class SanGuoGame {
         }
         return drawn;
     }
+    /**
+     * Phase 10：牌因"弃置/判定"进入弃牌堆的中央入口——逐张置入并发出 `card_discarded`
+     * 触发点（`actor` 为牌的原主，`reason` 为"弃置"/"判定"），钩子可在此时把牌从弃牌堆取走
+     * （如落英）。调用方负责先把牌从原区域移出（`removeHandCardAt` 等）；本方法只负责入堆+发触发点。
+     * "使用/打出"的牌入堆不要走这里（直接 `discardPile.push`），否则落英会误触发；
+     * 装备重建牌、拼点牌、洛神红牌同样不走这里。
+     */
+    async discardCards(cards, actor, reason, logs) {
+        for (const card of cards) {
+            this.discardPile.push(card);
+            await this.emitSkillTrigger("card_discarded", { actor, card, reason }, logs);
+        }
+    }
     drawCard() {
         if (this.deck.length === 0) {
             if (this.discardPile.length === 0) {
@@ -2129,9 +2257,11 @@ export class SanGuoGame {
             logs.push(`${reason}无法判定：牌堆为空`);
             return null;
         }
-        this.discardPile.push(card);
         const suitNames = { heart: "红桃", diamond: "方片", club: "梅花", spade: "黑桃", none: "无花色" };
         logs.push(`${reason}判定牌：${suitNames[card.suit]}${card.rank} ${card.type}`);
+        // Phase 10：判定牌入弃牌堆即发 card_discarded（actor 为判定归属者；落英等技能可此时获得之）。
+        // 注意：此时判定尚未结算（改判/天妒在后），落英先于天妒获得是既定顺序。
+        await this.discardCards([card], owner ?? this.currentPlayer, "判定", logs);
         // 拦截点 judgment：外部包可替换判定牌实现"改判"。钩子自己负责把替换牌从原区域移除，
         // 引擎负责把替换牌置入弃牌堆并接管后续（与内置鬼才的处理方式一致）。
         const judgmentPayload = { ...(owner ? { actor: owner } : {}), reason, card, judgmentCard: card };
@@ -2140,8 +2270,9 @@ export class SanGuoGame {
             const replacement = judgmentPayload.judgmentCard;
             // 兜底：替换牌若还留在其他区域（外部钩子漏移除），先清掉再入弃牌堆，保证单区唯一
             const cleaned = this.removeCardFromAllZones(replacement.id);
-            this.discardPile.push(replacement);
             logs.push(`${reason}判定牌被替换：${describeCard(card)} → ${describeCard(replacement)}`);
+            // 替换牌成为新的判定牌（原主未知，按判定归属者计 actor）。
+            await this.discardCards([replacement], owner ?? this.currentPlayer, "判定", logs);
             if (cleaned > 0) {
                 logs.push(`${reason}改判替换牌残留在其他区域，已清理 ${cleaned} 处`);
             }
@@ -2164,8 +2295,9 @@ export class SanGuoGame {
                 if (decision.choice === "card") {
                     const replacement = await this.removeUsableCardBySourceId(guiCaiPlayer, decision.sourceId);
                     if (replacement) {
-                        this.discardPile.push(replacement);
                         logs.push(`${guiCaiPlayer.name} 发动${SkillName.GuiCai}，以 ${describeCard(replacement)} 替换判定牌 ${describeCard(card)}`);
+                        // 替换牌出自鬼才持有者的手牌，actor 计其原主。
+                        await this.discardCards([replacement], guiCaiPlayer, "判定", logs);
                         card = replacement;
                     }
                 }
@@ -2190,8 +2322,14 @@ export class SanGuoGame {
             return;
         }
         let moved = false;
+        // Phase 9：轮次推进——遍历经过本轮起始座位即一轮结束（起始玩家已阵亡时，
+        // 遍历会直接越过其座位，轮次照常推进，锚点顺延到落点座位）。
+        let wrapped = false;
         for (let i = 0; i < this.players.length; i += 1) {
             this.currentPlayerIndex = (this.currentPlayerIndex + 1) % this.players.length;
+            if (this.currentPlayerIndex === this.roundStartIndex) {
+                wrapped = true;
+            }
             if (this.players[this.currentPlayerIndex]?.alive) {
                 moved = true;
                 break;
@@ -2199,6 +2337,11 @@ export class SanGuoGame {
         }
         if (moved) {
             this.turn += 1;
+            if (wrapped) {
+                this.round += 1;
+                this.roundStartIndex = this.currentPlayerIndex;
+                this.skillUsedThisRound = new Map();
+            }
         }
     }
     async advanceIfCurrentPlayerDead(logs) {
@@ -2272,16 +2415,18 @@ export class SanGuoGame {
     }
     async discardFromPlayerHand(player, count, logs) {
         let discarded = 0;
+        const discardLogs = [];
         for (let i = 0; i < count && player.hand.length > 0; i += 1) {
             const index = this.randomIndex(player.hand.length);
             const removed = await this.removeHandCardAt(player, index);
             if (removed) {
-                this.discardPile.push(removed);
+                await this.discardCards([removed], player, "弃置", discardLogs);
                 discarded += 1;
             }
         }
         if (discarded > 0) {
             logs.push(`${player.name} 弃置了 ${discarded} 张手牌`);
+            logs.push(...discardLogs);
         }
         return discarded;
     }
@@ -2456,6 +2601,14 @@ export class SanGuoGame {
     }
     isSkillUsed(playerId, skill) {
         return playerIsSkillUsed(this, playerId, skill);
+    }
+    /** Phase 9：记一次"本轮已用过该技能"（供外部技能 ctx 调用）。 */
+    markSkillUsedThisRound(playerId, skill) {
+        playerMarkSkillUsedThisRound(this, playerId, skill);
+    }
+    /** Phase 9：查"本轮是否已用过该技能"（供外部技能 ctx 调用）。 */
+    isSkillUsedThisRound(playerId, skill) {
+        return playerIsSkillUsedThisRound(this, playerId, skill);
     }
     canPlaySlashInTurn(player) {
         return canPlaySlashInTurnImpl(this, player);
